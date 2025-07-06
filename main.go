@@ -1,21 +1,40 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"os"
 
 	//"github.com/gammazero/nexus/v3/client"
 	"github.com/gammazero/nexus/v3/router"
+	"gopkg.in/yaml.v3"
 
 	etcdv3 "go.etcd.io/etcd/client/v3"
 )
 
+type Config struct {
+	Etcd       etcdv3.Config `json:"etcd"`
+	Wamp       string        `json:"wamp"`
+	Prometheus string        `json:"prometheus"`
+}
+
 func main() {
-	cli, err := etcdv3.New(etcdv3.Config{
-		Endpoints: []string{"192.168.0.103:2379"},
-		Username:  "vnxclass",
-		Password:  "vnxclass",
-	})
+	configPath := flag.String("config", "vnxclass.yaml", "Path to configuration file")
+	confBytes, err := os.ReadFile(*configPath)
+	if err != nil {
+		log.Fatal("could not read config: %w", err)
+	}
+	config := Config{
+		Etcd: etcdv3.Config{
+			Endpoints: []string{"127.0.0.1:2379"},
+		},
+		Wamp: "0.0.0.0:8080",
+	}
+	err = yaml.Unmarshal(confBytes, &config)
+	if err != nil {
+		log.Fatal("could not deserialize config: %w", err)
+	}
+	cli, err := etcdv3.New(config.Etcd)
 	if err != nil {
 		log.Fatal("Could not open etcd client", err)
 	}
@@ -30,7 +49,7 @@ func main() {
 	}
 
 	srv := router.NewWebsocketServer(theRouter)
-	closer, err := srv.ListenAndServe("0.0.0.0:8080")
+	closer, err := srv.ListenAndServe(config.Wamp)
 	if err != nil {
 		log.Fatal("ListenAndServe failed on a wamp router: %w", err)
 	}
@@ -39,7 +58,7 @@ func main() {
 
 	tenantProjectsMap, err := imp.GetTenantsAndProjects()
 	if err != nil {
-		log.Fatal("failed to build map of tenatnts and projects: %w", err)
+		log.Fatal("failed to build map of tenants and projects: %w", err)
 	}
 
 	err = imp.PopulateWampRealms(theRouter, tenantProjectsMap)
@@ -51,17 +70,4 @@ func main() {
 
 	quit := make(chan string)
 	<-quit
-
-	/*
-	   {
-	     "person1": {
-	         "name": "Alice",
-	         "welcome": "Hello Alice!"
-	     },
-	     "person2": {
-	         "name": "Bob",
-	         "welcome": "Hello Bob!"
-	     }
-	   }
-	*/
 }
