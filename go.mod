@@ -9,7 +9,7 @@ require (
 	github.com/gammazero/nexus/v3 v3.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/go-jsonnet v0.20.0 // indirect
+	github.com/google/go-jsonnet v0.21.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.21 // indirect
@@ -29,5 +29,5 @@ require (
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	sigs.k8s.io/yaml v1.2.0 // indirect
+	sigs.k8s.io/yaml v1.4.0 // indirect
 )

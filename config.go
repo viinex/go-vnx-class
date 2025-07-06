@@ -12,18 +12,29 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-func (imp EtcdImporter) Import(importedFrom, importedPath string) (contents jsonnet.Contents, foundAt string, err error) {
-	k, err := imp.cli.KV.Get(context.Background(), "/templates/jsonnet/"+importedPath)
-	if err != nil {
-		log.Fatal("Could not read jsonnet", importedPath, err)
-		return
-	}
-	fmt.Println("count: ", k.Count)
-
-	return jsonnet.MakeContentsRaw(k.Kvs[0].Value), importedPath, nil
+type EtcdJsonnetImporter struct {
+	EtcdClient
+	cache map[string]jsonnet.Contents
 }
 
-func (imp EtcdImporter) GetTenantsAndProjects() (res map[string][]string, err error) {
+func (imp EtcdJsonnetImporter) Import(importedFrom, importedPath string) (contents jsonnet.Contents, foundAt string, err error) {
+	cached, ok := imp.cache[importedPath]
+	if ok {
+		return cached, importedPath, nil
+	}
+	k, err := imp.cli.KV.Get(context.Background(), "/templates/jsonnet/"+importedPath)
+	if err != nil {
+		log.Print("Could not read jsonnet", importedPath, err)
+		return
+	}
+	fmt.Println("importing: ", importedPath, k.Count, len(k.Kvs[0].Value))
+	contents = jsonnet.MakeContentsRaw(k.Kvs[0].Value)
+	imp.cache[importedPath] = contents
+
+	return contents, importedPath, nil
+}
+
+func (imp EtcdClient) GetTenantsAndProjects() (res map[string][]string, err error) {
 	return enumerateHierarchy(imp.cli, "/config")
 }
 
@@ -100,4 +111,24 @@ func enumerateHierarchy(cli *clientv3.Client, prefix string) (map[string][]strin
 	}
 
 	return results, nil
+}
+
+func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string) (string, error) {
+	vm := jsonnet.MakeVM()
+	vm.Importer(EtcdJsonnetImporter{EtcdClient: eks.EtcdClient, cache: make(map[string]jsonnet.Contents)})
+
+	kconf, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/"+clusterName+".yaml")
+	if err != nil || len(kconf.Kvs) != 1 {
+		log.Print("cannot load config document")
+		return "", err
+	}
+	vm.ExtVar("confYaml", string(kconf.Kvs[0].Value))
+	vm.ExtVar("CID", clusterName)
+	vm.ExtVar("OSName", "Linux")
+	jsonStr, err := vm.EvaluateFile("main.jsonnet")
+	if err != nil {
+		log.Print("error while building config", err)
+		return "", err
+	}
+	return jsonStr, nil
 }

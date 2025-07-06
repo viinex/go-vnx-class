@@ -11,6 +11,7 @@ import (
 
 	//"github.com/gammazero/nexus/v3/client"
 	//"github.com/gammazero/nexus/v3/router"
+	"github.com/gammazero/nexus/v3/client"
 	"github.com/gammazero/nexus/v3/router/auth"
 
 	"github.com/gammazero/nexus/v3/router"
@@ -84,8 +85,8 @@ func defaultViinexPermissions() WampPermissions {
 			wamp.REGISTER:  {"com.viinex.api"},
 		},
 		"user": {
-			wamp.SUBSCRIBE: {"com.viinex", "wamp.registration"},
-			wamp.CALL:      {"com.viinex", "wamp.registration"},
+			wamp.SUBSCRIBE: {"com.viinex.api", "wamp.registration"},
+			wamp.CALL:      {"com.viinex.api", "wamp.registration"},
 		},
 		"operator": {
 			wamp.SUBSCRIBE: {"com.viinex", "com.viinex.infra", "wamp.registration"},
@@ -137,7 +138,7 @@ func (va ViinexAuthorizer) Authorize(sess *wamp.Session, msg wamp.Message) (bool
 			return true, nil
 		}
 	}
-	return true, nil
+	return false, nil
 }
 
 // AuthRole implements auth.KeyStore.
@@ -162,7 +163,7 @@ func (ksi EtcdKeyStore) Provider() string {
 	return "EtcdKeyStore"
 }
 
-func (imp EtcdImporter) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string) error {
+func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string) error {
 	for tenant, projects := range tenantProjectsMap {
 		for _, project := range projects {
 			var eks EtcdKeyStore
@@ -178,10 +179,51 @@ func (imp EtcdImporter) PopulateWampRealms(theRouter router.Router, tenantProjec
 			rcfg.Authorizer = ViinexAuthorizer{permissions: defaultViinexPermissions()}
 			err := theRouter.AddRealm(&rcfg)
 			if err != nil {
-				log.Fatal("could not add realm: %w", err)
+				log.Printf("could not add realm: %s", err)
+				return err
+			}
+			ccfg := client.Config{
+				Realm: project,
+			}
+			// create a local client and register infra endpoints
+			wampClient, err := client.ConnectLocal(theRouter, ccfg)
+			if err != nil {
+				log.Printf("could not create a local client on realm %s: %s", ccfg.Realm, err)
+				return err
+			}
+			// wampClient.Close() should be called at some point
+			err = wampClient.Register("com.viinex.infra.get_cluster_config", eks.GetClusterConfigHandler, nil)
+			if err != nil {
+				log.Print("could not register com.viinex.infra.get_cluster_config: %w", err)
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+const ErrWampInfraHanlerFailed wamp.URI = "com.viinex.infra.failed"
+
+func (eks EtcdKeyStore) GetClusterConfigHandler(ctx context.Context, inv *wamp.Invocation) client.InvokeResult {
+	if len(inv.Arguments) != 1 {
+		log.Print("there should be exactly 1 string argument to com.viinex.infra.get_cluster_config call")
+		return client.InvokeResult{Err: wamp.ErrInvalidArgument}
+	}
+	clusterName, ok := inv.Arguments[0].(string)
+	if !ok {
+		log.Print("there should be exactly 1 argument to com.viinex.infra.get_cluster_config call")
+		return client.InvokeResult{Err: wamp.ErrInvalidArgument}
+	}
+
+	resConfig, err := eks.GetClusterConfig(ctx, clusterName)
+
+	if err != nil {
+		log.Print("could not GetClusterConfig: %s", err)
+		return client.InvokeResult{Err: ErrWampInfraHanlerFailed}
+	}
+
+	res := client.InvokeResult{
+		Args: wamp.List{resConfig},
+	}
+	return res
 }
