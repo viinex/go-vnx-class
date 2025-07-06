@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	//"log"
 	//"os"
 
 	//"github.com/gammazero/nexus/v3/client"
 	//"github.com/gammazero/nexus/v3/router"
-	//"github.com/gammazero/nexus/v3/router/auth"
+	"github.com/gammazero/nexus/v3/router/auth"
 
+	"github.com/gammazero/nexus/v3/router"
 	"github.com/gammazero/nexus/v3/wamp"
 
 	hex "encoding/hex"
@@ -158,4 +160,28 @@ func (ksi EtcdKeyStore) PasswordInfo(authid string) (salt string, keylen int, it
 // Provider implements auth.KeyStore.
 func (ksi EtcdKeyStore) Provider() string {
 	return "EtcdKeyStore"
+}
+
+func (imp EtcdImporter) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string) error {
+	for tenant, projects := range tenantProjectsMap {
+		for _, project := range projects {
+			var eks EtcdKeyStore
+			eks.cli = imp.cli
+			eks.Tenant = tenant
+			eks.Realm = project
+			rcfg := router.RealmConfig{
+				URI:           wamp.URI(project),
+				AnonymousAuth: false,
+			}
+
+			rcfg.Authenticators = append(rcfg.Authenticators, auth.NewCryptoSignAuthenticator(eks, 0))
+			rcfg.Authorizer = ViinexAuthorizer{permissions: defaultViinexPermissions()}
+			err := theRouter.AddRealm(&rcfg)
+			if err != nil {
+				log.Fatal("could not add realm: %w", err)
+				return err
+			}
+		}
+	}
+	return nil
 }

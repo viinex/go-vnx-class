@@ -1,31 +1,14 @@
 package main
 
 import (
-	"fmt"
-
-	"context"
 	"log"
 	"os"
 
-	"github.com/google/go-jsonnet"
-
 	//"github.com/gammazero/nexus/v3/client"
 	"github.com/gammazero/nexus/v3/router"
-	"github.com/gammazero/nexus/v3/router/auth"
 
 	etcdv3 "go.etcd.io/etcd/client/v3"
 )
-
-func (imp EtcdImporter) Import(importedFrom, importedPath string) (contents jsonnet.Contents, foundAt string, err error) {
-	k, err := imp.cli.KV.Get(context.Background(), "/templates/jsonnet/"+importedPath)
-	if err != nil {
-		log.Fatal("Could not read jsonnet", importedPath, err)
-		return
-	}
-	fmt.Println("count: ", k.Count)
-
-	return jsonnet.MakeContentsRaw(k.Kvs[0].Value), importedPath, nil
-}
 
 func main() {
 	cli, err := etcdv3.New(etcdv3.Config{
@@ -38,17 +21,17 @@ func main() {
 		return
 	}
 
-	t := cli.Txn(context.Background())
-	vm := jsonnet.MakeVM()
-	vm.Importer(EtcdImporter{cli: cli})
+	//t := cli.Txn(context.Background())
+	// vm := jsonnet.MakeVM()
+	// vm.Importer(EtcdImporter{cli: cli})
 
-	jsonStr, err := vm.EvaluateFile("test.jsonnet")
-	if err != nil {
-		log.Fatal(err)
-	}
-	t.Commit()
+	// jsonStr, err := vm.EvaluateFile("test.jsonnet")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// t.Commit()
 
-	fmt.Println(jsonStr)
+	// fmt.Println(jsonStr)
 
 	logger := log.New(os.Stderr, "wamp", 0)
 
@@ -56,29 +39,30 @@ func main() {
 	cfg.Debug = true
 	theRouter, err := router.NewRouter(&cfg, logger)
 	if err != nil {
-		log.Fatal("Could not create wamp router")
+		log.Fatal("could not create wamp router: %w", err)
 		os.Exit(1)
 	}
 
 	srv := router.NewWebsocketServer(theRouter)
 	closer, err := srv.ListenAndServe("0.0.0.0:8080")
 	if err != nil {
-		log.Fatal("ListenAndServe failed on a wamp router: ", err)
+		log.Fatal("ListenAndServe failed on a wamp router: %w", err)
 		os.Exit(1)
 	}
 
-	rcfg := router.RealmConfig{
-		URI:           "s26",
-		AnonymousAuth: false,
+	imp := EtcdImporter{cli: cli}
+
+	tenantProjectsMap, err := imp.GetTenantsAndProjects()
+	if err != nil {
+		log.Fatal("failed to build map of tenatnts and projects: %w", err)
+		os.Exit(1)
 	}
 
-	var eks EtcdKeyStore
-	eks.cli = cli
-	eks.Tenant = "gzh"
-	eks.Realm = "s26"
-	rcfg.Authenticators = append(rcfg.Authenticators, auth.NewCryptoSignAuthenticator(eks, 0))
-	rcfg.Authorizer = ViinexAuthorizer{permissions: defaultViinexPermissions()}
-	theRouter.AddRealm(&rcfg)
+	err = imp.PopulateWampRealms(theRouter, tenantProjectsMap)
+	if err != nil {
+		log.Fatal("could not populate wamp realms: %w", err)
+		os.Exit(1)
+	}
 
 	defer closer.Close()
 
