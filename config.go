@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/go-jsonnet"
+	"gopkg.in/yaml.v3"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -24,10 +25,13 @@ func (imp EtcdJsonnetImporter) Import(importedFrom, importedPath string) (conten
 	}
 	k, err := imp.cli.KV.Get(context.Background(), "/templates/jsonnet/"+importedPath)
 	if err != nil {
-		log.Print("Could not read jsonnet", importedPath, err)
-		return
+		log.Printf("could not read jsonnet %s: %s", importedPath, err)
+		return jsonnet.Contents{}, "", err
 	}
-	fmt.Println("importing: ", importedPath, k.Count, len(k.Kvs[0].Value))
+	if k.Count == 0 {
+		err = fmt.Errorf("etcd key %s not found", importedPath)
+		return jsonnet.Contents{}, "", err
+	}
 	contents = jsonnet.MakeContentsRaw(k.Kvs[0].Value)
 	imp.cache[importedPath] = contents
 
@@ -113,19 +117,55 @@ func enumerateHierarchy(cli *clientv3.Client, prefix string) (map[string][]strin
 	return results, nil
 }
 
+type ConfigRecipe struct {
+	Main       string            `yaml:"main"`
+	OSName     string            `yaml:"os-name"`
+	ExtStr     map[string]string `yaml:"ext-str"`
+	ExtStrFile map[string]string `yaml:"ext-str-file"`
+}
+
 func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string) (string, error) {
 	vm := jsonnet.MakeVM()
 	vm.Importer(EtcdJsonnetImporter{EtcdClient: eks.EtcdClient, cache: make(map[string]jsonnet.Contents)})
 
-	kconf, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/"+clusterName+".yaml")
-	if err != nil || len(kconf.Kvs) != 1 {
+	conf, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/"+clusterName+".yaml")
+	if err != nil || conf.Count != 1 {
 		log.Print("cannot load config document")
 		return "", err
 	}
-	vm.ExtVar("confYaml", string(kconf.Kvs[0].Value))
+
+	recipeKv, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/recipe.yaml")
+	if err != nil {
+		log.Print("error while trying to load recipe.yaml")
+		return "", err
+	}
+	recipe := ConfigRecipe{
+		Main:   "main.jsonnet",
+		OSName: "Linux",
+	}
+	if recipeKv.Count > 0 {
+		err = yaml.Unmarshal(recipeKv.Kvs[0].Value, &recipe)
+		if err != nil {
+			log.Print("cannot yaml-decode recipe.yaml", err)
+			return "", err
+		}
+		for k, v := range recipe.ExtStr {
+			vm.ExtVar(k, v)
+		}
+		for k, f := range recipe.ExtStrFile {
+			fkv, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/"+f)
+			if err != nil || fkv.Count != 1 {
+				log.Printf("could not load value for ext-str-file %s: %s", f, err)
+				return "", err
+			}
+			vm.ExtVar(k, string(fkv.Kvs[0].Value))
+		}
+	}
+
+	vm.ExtVar("OSName", recipe.OSName)
+	vm.ExtVar("confYaml", string(conf.Kvs[0].Value))
 	vm.ExtVar("CID", clusterName)
-	vm.ExtVar("OSName", "Linux")
-	jsonStr, err := vm.EvaluateFile("main.jsonnet")
+	jsonStr, err := vm.EvaluateFile(recipe.Main)
 	if err != nil {
 		log.Print("error while building config", err)
 		return "", err

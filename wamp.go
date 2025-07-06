@@ -218,8 +218,8 @@ func (eks EtcdKeyStore) GetClusterConfigHandler(ctx context.Context, inv *wamp.I
 	resConfig, err := eks.GetClusterConfig(ctx, clusterName)
 
 	if err != nil {
-		log.Print("could not GetClusterConfig: %s", err)
-		return client.InvokeResult{Err: ErrWampInfraHanlerFailed}
+		log.Printf("could not GetClusterConfig: %s", err)
+		return client.InvokeResult{Err: ErrWampInfraHanlerFailed, Args: wamp.List{err.Error()}}
 	}
 
 	res := client.InvokeResult{
