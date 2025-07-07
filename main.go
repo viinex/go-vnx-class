@@ -19,20 +19,25 @@ type Config struct {
 }
 
 func main() {
-	configPath := flag.String("config", "vnxclass.yaml", "Path to configuration file")
-	confBytes, err := os.ReadFile(*configPath)
-	if err != nil {
-		log.Fatal("could not read config: %w", err)
-	}
 	config := Config{
 		Etcd: etcdv3.Config{
 			Endpoints: []string{"127.0.0.1:2379"},
 		},
 		Wamp: "0.0.0.0:8080",
 	}
-	err = yaml.Unmarshal(confBytes, &config)
-	if err != nil {
-		log.Fatal("could not deserialize config: %w", err)
+
+	configPath := flag.String("config", "vnxclass.yaml", "Path to configuration file")
+	flag.Parse()
+
+	if *configPath != "" {
+		confBytes, err := os.ReadFile(*configPath)
+		if err != nil {
+			log.Fatal("could not read config: ", err)
+		}
+		err = yaml.Unmarshal(confBytes, &config)
+		if err != nil {
+			log.Fatal("could not deserialize config: ", err)
+		}
 	}
 	cli, err := etcdv3.New(config.Etcd)
 	if err != nil {
@@ -45,25 +50,25 @@ func main() {
 	cfg.Debug = true
 	theRouter, err := router.NewRouter(&cfg, logger)
 	if err != nil {
-		log.Fatal("could not create wamp router: %w", err)
+		log.Fatal("could not create wamp router: ", err)
 	}
 
 	srv := router.NewWebsocketServer(theRouter)
 	closer, err := srv.ListenAndServe(config.Wamp)
 	if err != nil {
-		log.Fatal("ListenAndServe failed on a wamp router: %w", err)
+		log.Fatal("ListenAndServe failed on a wamp router: ", err)
 	}
 
 	imp := EtcdClient{cli: cli}
 
 	tenantProjectsMap, err := imp.GetTenantsAndProjects()
 	if err != nil {
-		log.Fatal("failed to build map of tenants and projects: %w", err)
+		log.Fatal("failed to build map of tenants and projects: ", err)
 	}
 
 	err = imp.PopulateWampRealms(theRouter, tenantProjectsMap)
 	if err != nil {
-		log.Fatal("could not populate wamp realms: %w", err)
+		log.Fatal("could not populate wamp realms: ", err)
 	}
 
 	defer closer.Close()
