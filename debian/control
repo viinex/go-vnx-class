@@ -1,0 +1,13 @@
+Source: vnx-class
+Section: unknown
+Priority: optional
+Maintainer: support@viinex.com
+Build-Depends: debhelper(>=9)
+Standards-Version: 3.9.4
+Homepage: https://viinex.com/
+
+Package: vnx-class
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: vnx-class is cloud assistant daemon
+ for running viinex on the edge devices or servers.

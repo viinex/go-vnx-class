@@ -1,0 +1,14 @@
+[Unit]
+Description=viinex cloud assistant daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/vnx-class --config=/etc/vnx-class.yaml
+TimeoutSec=30
+LimitNOFILE=16384
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

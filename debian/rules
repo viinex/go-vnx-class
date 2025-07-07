@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+DPKG_EXPORT_BUILDFLAGS = 1
+
+include /usr/share/dpkg/default.mk
+
+%:
+	dh $@ --destdir=$(CURDIR) --with=systemd
+
+override_dh_auto_install: TMP=$(CURDIR)/debian/vnx-class
+override_dh_auto_install:
+	mkdir -p $(TMP)/usr/sbin
+	install -m 755 $(CURDIR)/go-vnx-class $(TMP)/usr/sbin/vnx-class

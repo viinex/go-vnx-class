@@ -15,7 +15,7 @@ import (
 type Config struct {
 	Etcd       etcdv3.Config `json:"etcd"`
 	Wamp       string        `json:"wamp"`
-	Prometheus string        `json:"prometheus"`
+	Prometheus string        `json:"prometheus-push-uri"`
 }
 
 func main() {
