@@ -7,5 +7,5 @@ deb: go-vnx-class
 
 debclean:
 	go clean
-	rm -rf debian/vnx-class debian/files debian/vnx-class.debhelper.log debian/vnx-class.substvars debian/changelog
+	rm -rf debian/vnx-class debian/files debian/vnx-class.debhelper.log debian/vnx-class.substvars debian/changelog *.deb
 
