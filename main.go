@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net/http"
 	"os"
 
 	//"github.com/gammazero/nexus/v3/client"
@@ -16,6 +17,7 @@ type Config struct {
 	Etcd       etcdv3.Config `json:"etcd"`
 	Wamp       string        `json:"wamp"`
 	Prometheus string        `json:"prometheus-push-uri"`
+	Static     string        `json:"static"`
 }
 
 func main() {
@@ -23,7 +25,8 @@ func main() {
 		Etcd: etcdv3.Config{
 			Endpoints: []string{"127.0.0.1:2379"},
 		},
-		Wamp: "0.0.0.0:8080",
+		Wamp:   "0.0.0.0:8080",
+		Static: "/usr/share/viinex/web/browser/en",
 	}
 
 	configPath := flag.String("config", "vnxclass.yaml", "Path to configuration file")
@@ -44,7 +47,7 @@ func main() {
 		log.Fatal("Could not open etcd client", err)
 	}
 
-	logger := log.New(os.Stderr, "wamp", 0)
+	logger := log.New(os.Stderr, "wamp ", 0)
 
 	var cfg router.Config
 	cfg.Debug = true
@@ -54,7 +57,6 @@ func main() {
 	}
 
 	srv := router.NewWebsocketServer(theRouter)
-	closer, err := srv.ListenAndServe(config.Wamp)
 	if err != nil {
 		log.Fatal("ListenAndServe failed on a wamp router: ", err)
 	}
@@ -71,7 +73,16 @@ func main() {
 		log.Fatal("could not populate wamp realms: ", err)
 	}
 
-	defer closer.Close()
+	http.HandleFunc("/ws", srv.ServeHTTP)
+	fs := http.FileServer(http.Dir(config.Static))
+	http.Handle("/", http.StripPrefix("/", fs))
+
+	err = http.ListenAndServe(config.Wamp, nil)
+	if err != nil {
+		log.Fatal("could not serve http: ", err)
+	}
+
+	//defer closer.Close()
 
 	quit := make(chan string)
 	<-quit

@@ -7,3 +7,5 @@ etcd:
 wamp: 0.0.0.0:8080
 
 prometheus-push-uri: http://127.0.0.1:8428/api/v1/import/prometheus
+
+static: c:/program files/viinex/share/web
