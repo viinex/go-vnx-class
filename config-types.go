@@ -5,7 +5,8 @@ import (
 )
 
 type EtcdClient struct {
-	cli *etcdv3.Client
+	prefix string
+	cli    *etcdv3.Client
 }
 
 type EtcdKeyStore struct {

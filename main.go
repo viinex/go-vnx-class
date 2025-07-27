@@ -15,6 +15,7 @@ import (
 
 type Config struct {
 	Etcd       etcdv3.Config `json:"etcd"`
+	EtcdPrefix string        `json:"etcd-prefix"`
 	Wamp       string        `json:"wamp"`
 	Prometheus string        `json:"prometheus-push-uri"`
 	Static     string        `json:"static"`
@@ -61,17 +62,18 @@ func main() {
 		log.Fatal("ListenAndServe failed on a wamp router: ", err)
 	}
 
-	imp := EtcdClient{cli: cli}
+	imp := EtcdClient{cli: cli, prefix: config.EtcdPrefix}
 
 	tenantProjectsMap, err := imp.GetTenantsAndProjects()
 	if err != nil {
 		log.Fatal("failed to build map of tenants and projects: ", err)
 	}
 
-	err = imp.PopulateWampRealms(theRouter, tenantProjectsMap)
+	closer, err := imp.PopulateWampRealms(theRouter, tenantProjectsMap)
 	if err != nil {
 		log.Fatal("could not populate wamp realms: ", err)
 	}
+	defer closer.Close()
 
 	http.HandleFunc("/ws", srv.ServeHTTP)
 	fs := http.FileServer(http.Dir(config.Static))

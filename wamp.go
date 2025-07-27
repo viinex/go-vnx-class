@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 
 	//"log"
@@ -32,7 +33,7 @@ func (ksi EtcdKeyStore) AuthKey1(authid, authmethod string) ([]byte, error) {
 	if authmethod != "cryptosign" {
 		return nil, fmt.Errorf("unsupported authmethod %s", authmethod)
 	}
-	k, err := ksi.cli.KV.Get(context.Background(), "/config/"+ksi.Tenant+"/"+ksi.Realm+"/wamp.yaml")
+	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmKeyPath("wamp.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get wamp.yaml from etcd: %w", err)
 	}
@@ -56,7 +57,7 @@ func (ksi EtcdKeyStore) AuthKey(authid, authmethod string) ([]byte, error) {
 	if authmethod != "cryptosign" {
 		return nil, fmt.Errorf("unsupported authmethod %s", authmethod)
 	}
-	k, err := ksi.cli.KV.Get(context.Background(), "/config/"+ksi.Tenant+"/"+ksi.Realm+"/wamp/"+authid+"/cryptosign")
+	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmKeyPath("wamp/"+authid+"/cryptosign"))
 	if err != nil {
 		return nil, err
 	}
@@ -89,8 +90,8 @@ func defaultViinexPermissions() WampPermissions {
 			wamp.CALL:      {"com.viinex.api", "wamp.registration"},
 		},
 		"operator": {
-			wamp.SUBSCRIBE: {"com.viinex", "com.viinex.infra", "wamp.registration"},
-			wamp.CALL:      {"com.viinex", "com.viinex.infra", "wamp.registration"},
+			wamp.SUBSCRIBE: {"com.viinex.api", "com.viinex.infra", "wamp.registration"},
+			wamp.CALL:      {"com.viinex.api", "com.viinex.infra", "wamp.registration"},
 		},
 	}
 	return res
@@ -143,7 +144,7 @@ func (va ViinexAuthorizer) Authorize(sess *wamp.Session, msg wamp.Message) (bool
 
 // AuthRole implements auth.KeyStore.
 func (ksi EtcdKeyStore) AuthRole(authid string) (string, error) {
-	k, err := ksi.cli.KV.Get(context.Background(), "/config/"+ksi.Tenant+"/"+ksi.Realm+"/wamp/"+authid+"/role")
+	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmKeyPath("wamp/"+authid+"/role"))
 	if err != nil {
 		return "", err
 	}
@@ -163,7 +164,8 @@ func (ksi EtcdKeyStore) Provider() string {
 	return "EtcdKeyStore"
 }
 
-func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string) error {
+func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string) (io.Closer, error) {
+	rms := RealmManagers{}
 	for tenant, projects := range tenantProjectsMap {
 		for _, project := range projects {
 			var eks EtcdKeyStore
@@ -179,8 +181,7 @@ func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjects
 			rcfg.Authorizer = ViinexAuthorizer{permissions: defaultViinexPermissions()}
 			err := theRouter.AddRealm(&rcfg)
 			if err != nil {
-				log.Printf("could not add realm: %s", err)
-				return err
+				return nil, fmt.Errorf("could not add realm: %w", err)
 			}
 			ccfg := client.Config{
 				Realm: project,
@@ -188,18 +189,25 @@ func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjects
 			// create a local client and register infra endpoints
 			wampClient, err := client.ConnectLocal(theRouter, ccfg)
 			if err != nil {
-				log.Printf("could not create a local client on realm %s: %s", ccfg.Realm, err)
-				return err
+				return nil, fmt.Errorf("could not create a local client on realm %s: %w", ccfg.Realm, err)
 			}
 			// wampClient.Close() should be called at some point
 			err = wampClient.Register("com.viinex.infra.get_cluster_config", eks.GetClusterConfigHandler, nil)
 			if err != nil {
-				log.Print("could not register com.viinex.infra.get_cluster_config: %w", err)
-				return err
+				return nil, fmt.Errorf("could not register com.viinex.infra.get_cluster_config: %w", err)
+			}
+
+			rm, err := rms.RealmManager(eks, wampClient)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create realm manager: %w", err)
+			}
+			err = wampClient.SubscribeChan("wamp.registration", rm.regEvents, wamp.Dict{"match": "prefix"})
+			if err != nil {
+				return nil, fmt.Errorf("could not subscribe for registration events in realm: %w", err)
 			}
 		}
 	}
-	return nil
+	return rms, nil
 }
 
 const ErrWampInfraHanlerFailed wamp.URI = "com.viinex.infra.failed"

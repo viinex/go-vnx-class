@@ -23,7 +23,7 @@ func (imp EtcdJsonnetImporter) Import(importedFrom, importedPath string) (conten
 	if ok {
 		return cached, importedPath, nil
 	}
-	k, err := imp.cli.KV.Get(context.Background(), "/templates/jsonnet/"+importedPath)
+	k, err := imp.cli.KV.Get(context.Background(), imp.prefix+"/templates/jsonnet/"+importedPath)
 	if err != nil {
 		log.Printf("could not read jsonnet %s: %s", importedPath, err)
 		return jsonnet.Contents{}, "", err
@@ -39,7 +39,7 @@ func (imp EtcdJsonnetImporter) Import(importedFrom, importedPath string) (conten
 }
 
 func (imp EtcdClient) GetTenantsAndProjects() (res map[string][]string, err error) {
-	return enumerateHierarchy(imp.cli, "/config")
+	return enumerateHierarchy(imp.cli, imp.prefix+"/config")
 }
 
 // by gemini
@@ -124,17 +124,21 @@ type ConfigRecipe struct {
 	ExtStrFile map[string]string `yaml:"ext-str-file"`
 }
 
+func (eks EtcdKeyStore) GetRealmKeyPath(keyName string) string {
+	return eks.prefix + "/config/" + eks.Tenant + "/" + eks.Realm + "/" + keyName
+}
+
 func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string) (string, error) {
 	vm := jsonnet.MakeVM()
 	vm.Importer(EtcdJsonnetImporter{EtcdClient: eks.EtcdClient, cache: make(map[string]jsonnet.Contents)})
 
-	conf, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/"+clusterName+".yaml")
+	conf, err := eks.cli.KV.Get(ctx, eks.GetRealmKeyPath("clusters/"+clusterName+".yaml"))
 	if err != nil || conf.Count != 1 {
 		log.Print("cannot load config document")
 		return "", err
 	}
 
-	recipeKv, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/recipe.yaml")
+	recipeKv, err := eks.cli.KV.Get(ctx, eks.GetRealmKeyPath("recipe.yaml"))
 	if err != nil {
 		log.Print("error while trying to load recipe.yaml")
 		return "", err
@@ -153,7 +157,7 @@ func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string
 			vm.ExtVar(k, v)
 		}
 		for k, f := range recipe.ExtStrFile {
-			fkv, err := eks.cli.KV.Get(ctx, "/config/"+eks.Tenant+"/"+eks.Realm+"/"+f)
+			fkv, err := eks.cli.KV.Get(ctx, eks.GetRealmKeyPath(f))
 			if err != nil || fkv.Count != 1 {
 				log.Printf("could not load value for ext-str-file %s: %s", f, err)
 				return "", err
