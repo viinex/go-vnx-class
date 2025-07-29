@@ -33,7 +33,7 @@ func (ksi EtcdKeyStore) AuthKey1(authid, authmethod string) ([]byte, error) {
 	if authmethod != "cryptosign" {
 		return nil, fmt.Errorf("unsupported authmethod %s", authmethod)
 	}
-	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmKeyPath("wamp.yaml"))
+	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmConfigKeyPath("wamp.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get wamp.yaml from etcd: %w", err)
 	}
@@ -57,7 +57,7 @@ func (ksi EtcdKeyStore) AuthKey(authid, authmethod string) ([]byte, error) {
 	if authmethod != "cryptosign" {
 		return nil, fmt.Errorf("unsupported authmethod %s", authmethod)
 	}
-	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmKeyPath("wamp/"+authid+"/cryptosign"))
+	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmConfigKeyPath("wamp/"+authid+"/cryptosign"))
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (va ViinexAuthorizer) Authorize(sess *wamp.Session, msg wamp.Message) (bool
 
 // AuthRole implements auth.KeyStore.
 func (ksi EtcdKeyStore) AuthRole(authid string) (string, error) {
-	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmKeyPath("wamp/"+authid+"/role"))
+	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmConfigKeyPath("wamp/"+authid+"/role"))
 	if err != nil {
 		return "", err
 	}

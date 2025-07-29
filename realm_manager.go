@@ -8,9 +8,13 @@ import (
 	//"github.com/gammazero/nexus/v3/client"
 	//"github.com/gammazero/nexus/v3/router"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,19 +35,23 @@ type RealmManager struct {
 	regEvents  chan *wamp.Event
 
 	regMutex         sync.RWMutex
-	instances        map[wamp.ID]InstanceInfo
-	clusters         map[wamp.ID]ClusterInfo
+	instances        map[wamp.ID]*InstanceInfo
+	clusters         map[wamp.ID]*ClusterInfo
 	metricsProviders map[wamp.ID]wamp.URI
 }
 
 type InstanceInfo struct {
 	name string
 	uri  wamp.URI
+
+	endpoints *VnxclassEndpoints
 }
 
 type ClusterInfo struct {
 	name string
 	uri  wamp.URI
+
+	endpoints *[]SvcEntry
 }
 
 type RealmManagers struct {
@@ -121,11 +129,11 @@ func (rms RealmManagers) RealmManager(eks EtcdKeyStore, wampClient *client.Clien
 		mapping:          MappingNone{},
 		quit:             make(chan struct{}),
 		regEvents:        make(chan *wamp.Event, 100),
-		instances:        make(map[wamp.ID]InstanceInfo),
-		clusters:         make(map[wamp.ID]ClusterInfo),
+		instances:        make(map[wamp.ID]*InstanceInfo),
+		clusters:         make(map[wamp.ID]*ClusterInfo),
 		metricsProviders: make(map[wamp.ID]wamp.URI),
 	}
-	mappingResp, err := eks.cli.KV.Get(context.Background(), eks.GetRealmKeyPath("mapping.yaml"))
+	mappingResp, err := eks.cli.KV.Get(context.Background(), eks.GetRealmConfigKeyPath("mapping.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("fail to contact etcd: %w", err)
 	}
@@ -149,7 +157,7 @@ func (rm *RealmManager) registerInstance(uri wamp.URI, id wamp.ID, instance stri
 	if ok {
 		return errors.New("registration already present for the instance")
 	}
-	rm.instances[id] = InstanceInfo{
+	rm.instances[id] = &InstanceInfo{
 		uri:  uri,
 		name: instance,
 	}
@@ -163,7 +171,7 @@ func (rm *RealmManager) registerCluster(uri wamp.URI, id wamp.ID, cluster string
 	if ok {
 		return errors.New("registration already present for the cluster")
 	}
-	rm.clusters[id] = ClusterInfo{
+	rm.clusters[id] = &ClusterInfo{
 		uri:  uri,
 		name: cluster,
 	}
@@ -204,15 +212,14 @@ func (rm *RealmManager) registrationAlive(id wamp.ID) {
 	}
 }
 
-func (rm *RealmManager) handleInstanceAlive(instance InstanceInfo) {
-	opCtx, opCancel := context.WithTimeout(context.Background(), 60*time.Second)
+func (rm *RealmManager) getInstanceClustersProjected(instance string) ([]string, error) {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer opCancel()
-
-	rangeStart := rm.EtcdKeyStore.GetRealmKeyPath("clusters/")
+	rangeStart := rm.EtcdKeyStore.GetRealmConfigKeyPath("clusters/")
 	rangeEnd := clientv3.GetPrefixRangeEnd(rangeStart)
-	resp, err := rm.cli.Get(opCtx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(10000))
+	resp, err := rm.cli.Get(opCtx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(10000), clientv3.WithKeysOnly())
 	if err != nil {
-		log.Print("RealmManager.handleInstanceAlive: failed to get config keys")
+		return nil, fmt.Errorf("failed to get config keys: %w", err)
 	}
 	var clusters []string
 	for _, kv := range resp.Kvs {
@@ -224,11 +231,155 @@ func (rm *RealmManager) handleInstanceAlive(instance InstanceInfo) {
 		if !found {
 			continue
 		}
-		if rm.mapping.MatchClusterToInstance(instance.name, key) {
+		if rm.mapping.MatchClusterToInstance(instance, key) {
 			clusters = append(clusters, key)
 		}
 	}
-	log.Printf("Clusters in project %s suitable for instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clusters)
+	return clusters, nil
+}
+
+func (rm *RealmManager) getInstanceClustersDeployed(instance string) (map[string]string, error) {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer opCancel()
+	rangeStart := rm.EtcdKeyStore.GetRealmStatusKeyPath("instance/" + instance + "/clusters/")
+	rangeEnd := clientv3.GetPrefixRangeEnd(rangeStart)
+	resp, err := rm.cli.Get(opCtx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(10000))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config keys: %w", err)
+	}
+	clusters := make(map[string]string)
+	for _, kv := range resp.Kvs {
+		key, found := strings.CutPrefix(string(kv.Key), rangeStart)
+		if !found {
+			continue
+		}
+		clusters[key] = string(kv.Value)
+	}
+	return clusters, nil
+}
+
+func (rm *RealmManager) findInstanceDbClusters(instance *InstanceInfo) (map[string]string, error) {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer opCancel()
+
+	if instance.endpoints == nil {
+		uriSvc := string(instance.uri) + ".svc"
+		uriSvcMeta := string(instance.uri) + ".svc.meta"
+
+		resSvc, err := rm.wampClient.Call(opCtx, uriSvc, nil, nil, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		resSvcMeta, err := rm.wampClient.Call(opCtx, uriSvcMeta, nil, nil, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		svc, ok := ParseSvc(resSvc)
+		if !ok {
+			return nil, errors.New("could not recognize response to svc call")
+		}
+		svcMeta, ok := ParseSvcMeta(resSvcMeta)
+		if !ok {
+			return nil, errors.New("could not recognize response to svc.meta call")
+		}
+		log.Printf("svc and meta: %v, %v", svc, svcMeta)
+		var ep = FilterVnxclass(instance.uri, svc, svcMeta)
+		instance.endpoints = &ep
+	}
+
+	hashPrefix := GetDbPathClusterConfigHash(instance.name, "")
+	resList, err := rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".get2", nil, wamp.List{hashPrefix, wamp.Dict{"as_prefix": true}}, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config hashes from instance's config db: %w", err)
+	}
+	configHashes, ok := ParseKvStoreGet2(resList, hashPrefix)
+	if !ok {
+		return nil, fmt.Errorf("failed to parse list response: %w", err)
+	}
+	result := make(map[string]string, 0)
+	for k, v := range configHashes {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		result[k] = s
+	}
+	return result, nil
+}
+
+func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
+
+	clustersProjected, err := rm.getInstanceClustersProjected(instance.name)
+	if err != nil {
+		log.Printf("could not get projected clusters for %s: %s", instance.name, err)
+		return
+	}
+	log.Printf("Clusters projected in realm %s for instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clustersProjected)
+
+	clustersDeployed, err := rm.getInstanceClustersDeployed(instance.name)
+	if err != nil {
+		log.Printf("could not get deployed clusters for %s: %s", instance.name, err)
+		return
+	}
+	log.Printf("Clusters previously deployed in realm %s for instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clustersDeployed)
+
+	clustersFound, err := rm.findInstanceDbClusters(instance)
+	if err != nil {
+		log.Printf("could not find clusters for %s: %s", instance.name, err)
+		return
+	}
+	log.Printf("Clusters found in realm %s at instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clustersFound)
+
+	// first dispose clusters which are not meant to be up.
+	// dispose means we remove them from viinex' db, stop them and remove from status branch in etcd
+	clustersToDispose := make(map[string]bool)
+	for k := range clustersDeployed {
+		clustersToDispose[k] = true
+	}
+	for k := range clustersFound {
+		clustersToDispose[k] = true
+	}
+	for _, cp := range clustersProjected {
+		delete(clustersToDispose, cp)
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(clustersToDispose))
+	log.Printf("going to dispose clusters %v previously known to instance %s", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
+	for cluster := range clustersToDispose {
+		go func() {
+			defer wg.Done()
+			err := rm.disposeCluster(instance, cluster)
+			if err != nil {
+				log.Printf("failed to deploy cluster %s to instance %s: %s", cluster, instance.name, err)
+			}
+		}()
+	}
+	wg.Wait()
+	log.Printf("disposed clusters %v previously known to instance %s", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
+
+	clustersToDeploy := make(map[string]bool)
+	for _, cluster := range clustersProjected {
+		hashDeployed, wasDeployed := clustersDeployed[cluster]
+		hashFound, wasFound := clustersFound[cluster]
+		if !wasDeployed || !wasFound || hashDeployed != hashFound {
+			clustersToDeploy[cluster] = true
+		}
+	}
+
+	wg.Add(len(clustersToDeploy))
+	log.Printf("going to deploy clusters %v to instance %s", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
+	for cluster := range clustersToDeploy {
+		go func() {
+			defer wg.Done()
+			err := rm.deployCluster(instance, cluster)
+			if err != nil {
+				log.Printf("failed to deploy cluster %s to instance %s: %s", cluster, instance.name, err)
+			}
+		}()
+	}
+	wg.Wait()
+	log.Printf("deployed clusters %v to instance %s", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
 	/*
 		LIST 0: get list of cluster configs from etcd (/config/T/P/*.yaml)
 		LIST 1: get list of clusters assigned to this instance from etcd (/status/T/P/instance/instance.name/*) along with their hashes (keys)
@@ -249,4 +400,74 @@ func (rm *RealmManager) handleInstanceAlive(instance InstanceInfo) {
 		Apart from that, if config changes, remove cluster's record from /status
 		If mapping changes, remove the whole /status
 	*/
+}
+
+func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) error {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer opCancel()
+
+	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
+	configPath := GetDbPathClusterConfig(instance.name, cluster)
+
+	_, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster}}, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".delete", nil, wamp.List{hashPath}, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".delete", nil, wamp.List{configPath}, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "dispose", "cluster": cluster}}, nil, nil)
+	if err != nil {
+		return err
+	}
+	statusPath := rm.EtcdKeyStore.GetRealmStatusKeyPath("instance/" + instance.name + "/clusters/" + cluster)
+	_, err = rm.EtcdKeyStore.cli.KV.Delete(opCtx, statusPath)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) error {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer opCancel()
+
+	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
+	configPath := GetDbPathClusterConfig(instance.name, cluster)
+
+	config, err := rm.EtcdKeyStore.GetClusterConfig(opCtx, cluster)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	h.Write([]byte(config))
+	hash := hex.EncodeToString(h.Sum(nil))
+
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster}}, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".put", nil, wamp.List{configPath, config}, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".put", nil, wamp.List{hashPath, hash}, nil, nil)
+	if err != nil {
+		return err
+	}
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "deploy", "cluster": cluster}}, nil, nil)
+	if err != nil {
+		return err
+	}
+	statusPath := rm.EtcdKeyStore.GetRealmStatusKeyPath("instance/" + instance.name + "/clusters/" + cluster)
+	_, err = rm.EtcdKeyStore.cli.KV.Put(opCtx, statusPath, hash)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

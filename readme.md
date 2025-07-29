@@ -27,7 +27,7 @@ Top-level branches start under a common prefix which can be configured with conf
 
 There are three top-level branches: `templates`, `config` and `status`.
 
-Branch `templates` should have a sub-branch `jsonnet`. Keys stored under `templates/jsonnet` should have a suffix of `jsonnet` and should be jsonnet files defining how viinex configuration is generated. The files referenced but jsonnets with `import` directive are being sought under the same location, that is under `templates/jsonnet/` prefix in etcd. The `templates` branch is shared accross all tenants and projects.
+Branch `templates` should have a sub-branch `jsonnet`. Keys stored under `templates/jsonnet` should have a suffix of `jsonnet` and should be jsonnet files defining how viinex configuration is generated. The files referenced by jsonnets with `import` directive are being sought under the same location, that is under `templates/jsonnet/` prefix in etcd. The `templates` branch is shared accross all tenants and projects.
 
 Branch `config` contains two sub-levels named after Tenants and their Projects. (Tenant is a customer/organisation code name, while Project is a code name of the project). A project is considered an isolated namespace, where viinex instances and objects can potentially address each other, and users connecting to that namespace can address viinex objects. (This does not mean there is no access control enforced by the objects -- but access control is enforced by viinex objects, whereas Projects form the shape of infrastructure and are defined by `vnx-class`)
 
@@ -185,13 +185,14 @@ The content of the key `role` has the value of `viinex`. Currently the following
 - viinex
 - user
 - operator
+
 The role `viinex` should be used for accounts associated with viinex instances. Role `user` is meant to be associated with accounts associated with the users of viinex functionality. The role `operator` is for users who access both viinex and vnx-class functionality.
 
-Note that this model is coarse-grained, but it does not affect viinex' security model. The latter is still available, but it needs to be configured within viinex itself; it operates with viinex users, roles, objects and endpoint types. This is a different layer of access control. The three roles described here define which WAMP endpoints may be addressed by every specific actor, and in what way. It may be treated as WAMP transport level security, while the access control lists used by viinex `authnz` object is the "application level" security. The latter may be omitted for viinex instances and clusters supervised by `vnx-class` (thus allowing one to configure within viinex an HTTP or RTSP server which does not require authentication), however the WAMP transport level security is mandatory.
+Note that while this model is pretty much coarse-grained, this does not affect viinex' security model. The latter is still available, but it needs to be configured within viinex itself; it operates with viinex users, roles, objects and endpoint types. This is a different layer of access control. The three roles described here define which WAMP endpoints may be addressed by every specific actor, and in what way. It may be treated as WAMP transport level security, while the access control lists used by viinex `authnz` object is the "application level" security. The latter may be omitted for viinex instances and clusters supervised by `vnx-class` (thus allowing one to configure within viinex an HTTP or RTSP server which does not require authentication), however the WAMP transport level security is mandatory.
 
 The content of the key `cryptosign` contains the Crypotosign public key matching the private key set up at the host where viinex runs.
 
-WAMP credentials can be freely changed in the etcd database during `vnx-class` runtime; they go in effect immediately for new connection attempts. However these changes do not affect existing WAMP connections.
+WAMP credentials can be freely changed in the etcd database during `vnx-class` runtime; they go in effect immediately for new connection attempts. However these changes do not have effect on existing WAMP connections.
 
 
 Cluster to instance mapping
@@ -223,10 +224,12 @@ This set of mapping strategies is obviously not comprehensive, in particular the
 
 Clusters lifecycle management
 =============================
-When `vnx-class` supervises viinex instances and clusters, it is expected to watch for instances getting registererd and de-registered and the WAMP router, to manage the clusters' configuration and their lifecycle within viinex instances.
+When `vnx-class` supervises viinex instances and clusters, it is expected to watch for instances getting registererd and de-registered at the WAMP router, to manage the clusters' configuration and their lifecycle within viinex instances.
 
 This is achieved by means of cooperation between `vnx-class` and viinex objects running in the "main" (statically configured) cluster of a viinex instance.
 
 In particular, every viinex install has a copy of configuration file named `vnx-class-instance.json` which is installed into `/usr/share/viinex/js/modules`. This file can be either copied into `/etc/viinex.conf.d/`, or directly specified as the configuration source for viinex. The file refences a number of variables, which is why the variables file also has to be specified at viinex startup (as a command line parameter).
 
-The `vnx-class-instance.json` configuration file defines three objects: a WAMP client, which maintains connection to the WAMP router within `vnx-class`, an SQLite database which is used to store the clusters' configuration, and the script which makes sure that clusters get started upon viinex startup, and re-starts the cluster when its configuration gets changed in the database. Both the database and the script are registered within WAMP client, so they can be called by `vnx-class`, and this is what actually happens when the latter detects that viinex instance gets registered, or when the cluster's configuration changes in etcd database. Even though `vnx-class` is necessary to populate the instance-wise configuration database at viinex, -- the controller script is capable of starting previously configured clusters when `vnx-class` is unavailable.
+The `vnx-class-instance.json` configuration file defines three objects: a WAMP client, which maintains connection to the WAMP router within `vnx-class`, an SQLite database which is used to store the clusters' configuration, and the script which makes sure that clusters get started upon viinex startup, and re-starts the cluster when its configuration gets changed in the database. Both the database and the script are registered within WAMP client, so they can be called by `vnx-class`, and this is what actually happens when the latter detects that viinex instance gets registered, or when the cluster's configuration changes in etcd database. 
+
+Even though `vnx-class` is necessary to populate the instance-wise configuration database at viinex, -- the controller script is capable of starting previously configured clusters when `vnx-class` is unavailable.
