@@ -409,9 +409,18 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
 	configPath := GetDbPathClusterConfig(instance.name, cluster)
 
-	_, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster}}, nil, nil)
+	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
+		wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster, "intent": "dispose"}}, nil, nil)
 	if err != nil {
 		return err
+	}
+	var prepared bool
+	err = DecodeViaJSON(res, &prepared)
+	if err != nil {
+		return err
+	}
+	if !prepared {
+		return fmt.Errorf("controller script at instance %s declined prepare call to dispose cluster %s", instance.name, cluster)
 	}
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".delete", nil, wamp.List{hashPath}, nil, nil)
 	if err != nil {
@@ -421,7 +430,8 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 	if err != nil {
 		return err
 	}
-	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "dispose", "cluster": cluster}}, nil, nil)
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
+		wamp.List{wamp.Dict{"method": "dispose", "cluster": cluster}}, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -436,6 +446,20 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer opCancel()
 
+	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
+		wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster, "intent": "deploy"}}, nil, nil)
+	if err != nil {
+		return err
+	}
+	var prepared bool
+	err = DecodeViaJSON(res, &prepared)
+	if err != nil {
+		return err
+	}
+	if !prepared {
+		return fmt.Errorf("controller script at instance %s declined prepare call to deploy cluster %s", instance.name, cluster)
+	}
+
 	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
 	configPath := GetDbPathClusterConfig(instance.name, cluster)
 
@@ -447,10 +471,6 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	h.Write([]byte(config))
 	hash := hex.EncodeToString(h.Sum(nil))
 
-	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster}}, nil, nil)
-	if err != nil {
-		return err
-	}
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".put", nil, wamp.List{configPath, config}, nil, nil)
 	if err != nil {
 		return err
@@ -459,7 +479,8 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	if err != nil {
 		return err
 	}
-	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil, wamp.List{wamp.Dict{"method": "deploy", "cluster": cluster}}, nil, nil)
+	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
+		wamp.List{wamp.Dict{"method": "deploy", "cluster": cluster}}, nil, nil)
 	if err != nil {
 		return err
 	}
