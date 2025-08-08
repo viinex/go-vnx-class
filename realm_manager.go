@@ -191,7 +191,7 @@ func (rm *RealmManager) deregister(id wamp.ID) {
 	cluster, ok := rm.clusters[id]
 	if ok {
 		delete(rm.clusters, id)
-		log.Printf("RealmManager.deregister: removed registration %d for cluster %s at %s", id, cluster.name, instance.uri)
+		log.Printf("RealmManager.deregister: removed registration %d for cluster %s at %s", id, cluster.name, cluster.uri)
 		return
 	}
 }
@@ -207,7 +207,7 @@ func (rm *RealmManager) registrationAlive(id wamp.ID) {
 	}
 	cluster, ok := rm.clusters[id]
 	if ok {
-		log.Printf("RealmManager.registrationAlive: registration %d for cluster %s at %s", id, cluster.name, instance.uri)
+		log.Printf("RealmManager.registrationAlive: registration %d for cluster %s at %s", id, cluster.name, cluster.uri)
 		return
 	}
 }
