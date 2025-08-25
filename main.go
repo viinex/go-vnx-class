@@ -19,6 +19,7 @@ type Config struct {
 	Wamp       string        `json:"wamp"`
 	Prometheus string        `json:"prometheus-push-uri"`
 	Static     string        `json:"static"`
+	Debug      bool          `json:"debug"`
 }
 
 func main() {
@@ -28,6 +29,7 @@ func main() {
 		},
 		Wamp:   "0.0.0.0:8080",
 		Static: "/usr/share/viinex/web/browser/en",
+		Debug:  false,
 	}
 
 	configPath := flag.String("config", "vnxclass.yaml", "Path to configuration file")
@@ -51,7 +53,7 @@ func main() {
 	//logger := log.New(os.Stderr, "[wamp] ", 0)
 
 	var cfg router.Config
-	cfg.Debug = true
+	cfg.Debug = config.Debug
 	theRouter, err := router.NewRouter(&cfg, nil)
 	if err != nil {
 		log.Fatal("could not create wamp router: ", err)
