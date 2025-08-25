@@ -33,11 +33,13 @@ type RealmManager struct {
 	wampClient *client.Client
 	quit       chan struct{}
 	regEvents  chan *wamp.Event
+	watchChan  clientv3.WatchChan
 
-	regMutex         sync.RWMutex
 	instances        map[wamp.ID]*InstanceInfo
 	clusters         map[wamp.ID]*ClusterInfo
 	metricsProviders map[wamp.ID]wamp.URI
+
+	mutex sync.RWMutex
 }
 
 type InstanceInfo struct {
@@ -76,6 +78,10 @@ FOR:
 		case <-rm.wampClient.Done():
 			log.Print("quitting realm manager for ", rm.Realm)
 			break FOR
+		case watchResponse := <-rm.watchChan:
+			for _, v := range watchResponse.Events {
+				rm.handleEtcdConfigBranchChange(v)
+			}
 		case regEvent := <-rm.regEvents:
 			topic, ok := regEvent.Details["topic"].(wamp.URI)
 			if !ok {
@@ -98,10 +104,10 @@ FOR:
 				if !ok {
 					break SEL
 				}
-
-				if instance, ok := rm.mapping.MatchInstance(uri); ok {
+				mapping := rm.GetMapping()
+				if instance, ok := mapping.MatchInstance(uri); ok {
 					rm.registerInstance(uri, id, instance)
-				} else if cluster, ok := rm.mapping.MatchCluster(uri); ok {
+				} else if cluster, ok := mapping.MatchCluster(uri); ok {
 					rm.registerCluster(uri, id, cluster)
 				}
 			case "wamp.registration.on_register":
@@ -123,36 +129,57 @@ FOR:
 }
 
 func (rms RealmManagers) RealmManager(eks EtcdKeyStore, wampClient *client.Client) (*RealmManager, error) {
+	watchChan := eks.cli.Watcher.Watch(context.Background(), eks.GetRealmConfigKeyPath(""), clientv3.WithPrefix())
+	mapping, err := eks.LoadMapping(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
 	rm := RealmManager{
 		EtcdKeyStore:     eks,
 		wampClient:       wampClient,
-		mapping:          MappingNone{},
+		mapping:          mapping,
 		quit:             make(chan struct{}),
 		regEvents:        make(chan *wamp.Event, 100),
+		watchChan:        watchChan,
 		instances:        make(map[wamp.ID]*InstanceInfo),
 		clusters:         make(map[wamp.ID]*ClusterInfo),
 		metricsProviders: make(map[wamp.ID]wamp.URI),
-	}
-	mappingResp, err := eks.cli.KV.Get(context.Background(), eks.GetRealmConfigKeyPath("mapping.yaml"))
-	if err != nil {
-		return nil, fmt.Errorf("fail to contact etcd: %w", err)
-	}
-	if len(mappingResp.Kvs) != 0 {
-		r := PolymorphicMapping{}
-		err = yaml.Unmarshal(mappingResp.Kvs[0].Value, &r)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse cluster to instance mapping: %w", err)
-		}
-		rm.mapping = r
 	}
 	rms.realmManagers = append(rms.realmManagers, &rm)
 	go rm.RunManageRealm()
 	return &rm, nil
 }
 
+func (rm *RealmManager) GetMapping() Mapping {
+	rm.mutex.RLock()
+	defer rm.mutex.RUnlock()
+	return rm.mapping
+}
+
+func (eks *EtcdKeyStore) LoadMapping(ctx context.Context, mappingYaml *[]byte) (Mapping, error) {
+	if mappingYaml == nil {
+		mappingResp, err := eks.cli.KV.Get(ctx, eks.GetRealmConfigKeyPath("mapping.yaml"))
+		if err != nil {
+			return nil, fmt.Errorf("fail to contact etcd: %w", err)
+		}
+		if len(mappingResp.Kvs) != 0 {
+			mappingYaml = &(mappingResp.Kvs[0].Value)
+		}
+	}
+	if mappingYaml != nil {
+		r := PolymorphicMapping{}
+		err := yaml.Unmarshal(*mappingYaml, &r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse cluster to instance mapping: %w", err)
+		}
+		return r, nil
+	}
+	return MappingNone{}, nil
+}
+
 func (rm *RealmManager) registerInstance(uri wamp.URI, id wamp.ID, instance string) error {
-	rm.regMutex.Lock()
-	defer rm.regMutex.Unlock()
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
 	_, ok := rm.instances[id]
 	if ok {
 		return errors.New("registration already present for the instance")
@@ -161,12 +188,12 @@ func (rm *RealmManager) registerInstance(uri wamp.URI, id wamp.ID, instance stri
 		uri:  uri,
 		name: instance,
 	}
-	log.Printf("RealmManager.registerInstance: added registration %d for instance %s at %s", id, instance, uri)
+	log.Printf("RealmManager.registerInstance: added registration %d for instance %s at %s\n", id, instance, uri)
 	return nil
 }
 func (rm *RealmManager) registerCluster(uri wamp.URI, id wamp.ID, cluster string) error {
-	rm.regMutex.Lock()
-	defer rm.regMutex.Unlock()
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
 	_, ok := rm.clusters[id]
 	if ok {
 		return errors.New("registration already present for the cluster")
@@ -175,39 +202,39 @@ func (rm *RealmManager) registerCluster(uri wamp.URI, id wamp.ID, cluster string
 		uri:  uri,
 		name: cluster,
 	}
-	log.Printf("RealmManager.registerCluster: added registration %d for cluster %s at %s", id, cluster, uri)
+	log.Printf("RealmManager.registerCluster: added registration %d for cluster %s at %s\n", id, cluster, uri)
 	return nil
 }
 
 func (rm *RealmManager) deregister(id wamp.ID) {
-	rm.regMutex.Lock()
-	defer rm.regMutex.Unlock()
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
 	instance, ok := rm.instances[id]
 	if ok {
 		delete(rm.instances, id)
-		log.Printf("RealmManager.deregister: removed registration %d for instance %s at %s", id, instance.name, instance.uri)
+		log.Printf("RealmManager.deregister: removed registration %d for instance %s at %s\n", id, instance.name, instance.uri)
 		return
 	}
 	cluster, ok := rm.clusters[id]
 	if ok {
 		delete(rm.clusters, id)
-		log.Printf("RealmManager.deregister: removed registration %d for cluster %s at %s", id, cluster.name, cluster.uri)
+		log.Printf("RealmManager.deregister: removed registration %d for cluster %s at %s\n", id, cluster.name, cluster.uri)
 		return
 	}
 }
 
 func (rm *RealmManager) registrationAlive(id wamp.ID) {
-	rm.regMutex.Lock()
-	defer rm.regMutex.Unlock()
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
 	instance, ok := rm.instances[id]
 	if ok {
-		log.Printf("RealmManager.registrationAlive: registration %d for instance %s at %s", id, instance.name, instance.uri)
+		log.Printf("RealmManager.registrationAlive: registration %d for instance %s at %s\n", id, instance.name, instance.uri)
 		go rm.handleInstanceAlive(instance)
 		return
 	}
 	cluster, ok := rm.clusters[id]
 	if ok {
-		log.Printf("RealmManager.registrationAlive: registration %d for cluster %s at %s", id, cluster.name, cluster.uri)
+		log.Printf("RealmManager.registrationAlive: registration %d for cluster %s at %s\n", id, cluster.name, cluster.uri)
 		return
 	}
 }
@@ -215,15 +242,23 @@ func (rm *RealmManager) registrationAlive(id wamp.ID) {
 func (rm *RealmManager) getInstanceClustersProjected(instance string) ([]string, error) {
 	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer opCancel()
-	rangeStart := rm.EtcdKeyStore.GetRealmConfigKeyPath("clusters/")
-	rangeEnd := clientv3.GetPrefixRangeEnd(rangeStart)
-	resp, err := rm.cli.Get(opCtx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(10000), clientv3.WithKeysOnly())
+	clusters, err := rm.getClustersKnown(opCtx)
+	if err != nil {
+		return nil, err
+	}
+	return Filter(clusters, func(cluster string) bool { return rm.mapping.MatchClusterToInstance(instance, cluster) }), nil
+}
+
+func (rm *RealmManager) getClustersKnown(ctx context.Context) ([]string, error) {
+
+	prefix := rm.EtcdKeyStore.GetRealmConfigKeyPath("clusters/")
+	resp, err := rm.cli.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithKeysOnly())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config keys: %w", err)
 	}
 	var clusters []string
 	for _, kv := range resp.Kvs {
-		key, found := strings.CutPrefix(string(kv.Key), rangeStart)
+		key, found := strings.CutPrefix(string(kv.Key), prefix)
 		if !found {
 			continue
 		}
@@ -231,9 +266,7 @@ func (rm *RealmManager) getInstanceClustersProjected(instance string) ([]string,
 		if !found {
 			continue
 		}
-		if rm.mapping.MatchClusterToInstance(instance, key) {
-			clusters = append(clusters, key)
-		}
+		clusters = append(clusters, key)
 	}
 	return clusters, nil
 }
@@ -241,15 +274,14 @@ func (rm *RealmManager) getInstanceClustersProjected(instance string) ([]string,
 func (rm *RealmManager) getInstanceClustersDeployed(instance string) (map[string]string, error) {
 	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer opCancel()
-	rangeStart := rm.EtcdKeyStore.GetRealmStatusKeyPath("instance/" + instance + "/clusters/")
-	rangeEnd := clientv3.GetPrefixRangeEnd(rangeStart)
-	resp, err := rm.cli.Get(opCtx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(10000))
+	prefix := rm.EtcdKeyStore.GetRealmStatusMappingRecordPrefix(instance)
+	resp, err := rm.cli.Get(opCtx, prefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config keys: %w", err)
 	}
 	clusters := make(map[string]string)
 	for _, kv := range resp.Kvs {
-		key, found := strings.CutPrefix(string(kv.Key), rangeStart)
+		key, found := strings.CutPrefix(string(kv.Key), prefix)
 		if !found {
 			continue
 		}
@@ -283,7 +315,7 @@ func (rm *RealmManager) findInstanceDbClusters(instance *InstanceInfo) (map[stri
 		if !ok {
 			return nil, errors.New("could not recognize response to svc.meta call")
 		}
-		log.Printf("svc and meta: %v, %v", svc, svcMeta)
+		log.Printf("svc and meta: %v, %v\n", svc, svcMeta)
 		var ep = FilterVnxclass(instance.uri, svc, svcMeta)
 		instance.endpoints = &ep
 	}
@@ -312,24 +344,24 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 
 	clustersProjected, err := rm.getInstanceClustersProjected(instance.name)
 	if err != nil {
-		log.Printf("could not get projected clusters for %s: %s", instance.name, err)
+		log.Printf("could not get projected clusters for %s: %s\n", instance.name, err)
 		return
 	}
-	log.Printf("Clusters projected in realm %s for instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clustersProjected)
+	log.Printf("Clusters projected in realm %s for instance %s: %v\n", rm.EtcdKeyStore.Realm, instance.name, clustersProjected)
 
 	clustersDeployed, err := rm.getInstanceClustersDeployed(instance.name)
 	if err != nil {
-		log.Printf("could not get deployed clusters for %s: %s", instance.name, err)
+		log.Printf("could not get deployed clusters for %s: %s\n", instance.name, err)
 		return
 	}
-	log.Printf("Clusters previously deployed in realm %s for instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clustersDeployed)
+	log.Printf("Clusters previously deployed in realm %s for instance %s: %v\n", rm.EtcdKeyStore.Realm, instance.name, clustersDeployed)
 
 	clustersFound, err := rm.findInstanceDbClusters(instance)
 	if err != nil {
-		log.Printf("could not find clusters for %s: %s", instance.name, err)
+		log.Printf("could not find clusters for %s: %s\n", instance.name, err)
 		return
 	}
-	log.Printf("Clusters found in realm %s at instance %s: %v", rm.EtcdKeyStore.Realm, instance.name, clustersFound)
+	log.Printf("Clusters found in realm %s at instance %s: %v\n", rm.EtcdKeyStore.Realm, instance.name, clustersFound)
 
 	// first dispose clusters which are not meant to be up.
 	// dispose means we remove them from viinex' db, stop them and remove from status branch in etcd
@@ -345,18 +377,18 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 	}
 	var wg sync.WaitGroup
 	wg.Add(len(clustersToDispose))
-	log.Printf("going to dispose clusters %v previously known to instance %s", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
+	log.Printf("going to dispose clusters %v previously known to instance %s\n", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
 	for cluster := range clustersToDispose {
 		go func() {
 			defer wg.Done()
 			err := rm.disposeCluster(instance, cluster)
 			if err != nil {
-				log.Printf("failed to deploy cluster %s to instance %s: %s", cluster, instance.name, err)
+				log.Printf("failed to dispose cluster %s at instance %s: %s\n", cluster, instance.name, err)
 			}
 		}()
 	}
 	wg.Wait()
-	log.Printf("disposed clusters %v previously known to instance %s", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
+	log.Printf("disposed clusters %v previously known to instance %s\n", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
 
 	clustersToDeploy := make(map[string]bool)
 	for _, cluster := range clustersProjected {
@@ -374,12 +406,12 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 			defer wg.Done()
 			err := rm.deployCluster(instance, cluster)
 			if err != nil {
-				log.Printf("failed to deploy cluster %s to instance %s: %s", cluster, instance.name, err)
+				log.Printf("failed to deploy cluster %s to instance %s: %s\n", cluster, instance.name, err)
 			}
 		}()
 	}
 	wg.Wait()
-	log.Printf("deployed clusters %v to instance %s", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
+	log.Printf("deployed clusters %v to instance %s\n", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
 	/*
 		LIST 0: get list of cluster configs from etcd (/config/T/P/*.yaml)
 		LIST 1: get list of clusters assigned to this instance from etcd (/status/T/P/instance/instance.name/*) along with their hashes (keys)
@@ -435,7 +467,7 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 	if err != nil {
 		return err
 	}
-	statusPath := rm.EtcdKeyStore.GetRealmStatusKeyPath("instance/" + instance.name + "/clusters/" + cluster)
+	statusPath := rm.EtcdKeyStore.GetRealmStatusMappingRecordPrefix(instance.name) + cluster
 	_, err = rm.EtcdKeyStore.cli.KV.Delete(opCtx, statusPath)
 	if err != nil {
 		return err
@@ -484,11 +516,197 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	if err != nil {
 		return err
 	}
-	statusPath := rm.EtcdKeyStore.GetRealmStatusKeyPath("instance/" + instance.name + "/clusters/" + cluster)
+	statusPath := rm.EtcdKeyStore.GetRealmStatusMappingRecordPrefix(instance.name) + cluster
 	_, err = rm.EtcdKeyStore.cli.KV.Put(opCtx, statusPath, hash)
 	if err != nil {
 		return err
 	}
 
+	return nil
+}
+
+func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer opCancel()
+	key := string(event.Kv.Key)
+	prefixClusters := rm.EtcdKeyStore.GetRealmConfigKeyPath("clusters/")
+	pathMappingYaml := rm.EtcdKeyStore.GetRealmConfigKeyPath("mapping.yaml")
+	pathRecipeYaml := rm.EtcdKeyStore.GetRealmConfigKeyPath("recipe.yaml")
+	if key == pathRecipeYaml {
+		// when recipe gets changed we assume all configs should be re-generated and re-deployed
+		// might optimize this later
+		rm.handleClusterConfigChange(opCtx, nil)
+	} else if key == pathMappingYaml {
+		var mapping Mapping
+		if event.Type == clientv3.EventTypeDelete {
+			mapping = MappingNone{}
+		} else {
+			var err error //??
+			mapping, err = rm.EtcdKeyStore.LoadMapping(opCtx, &event.Kv.Value)
+			if err != nil {
+				log.Printf("warning: failed to load changed mapping: %s; previous mapping will be kept\n", err)
+				return
+			}
+		}
+		rm.mutex.Lock()
+		rm.mapping = mapping
+		rm.mutex.Unlock()
+		// iterate over status records, check if mapping is still valid, and if it's not -- remove status record and undeploy the cluster
+		rm.rearrangeMappings(opCtx)
+	} else if after, found := strings.CutPrefix(key, prefixClusters); found {
+		cluster, found := strings.CutSuffix(after, ".yaml")
+		if found {
+			rm.handleClusterConfigChange(opCtx, &cluster)
+		}
+	}
+}
+
+func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeCluster *string) error {
+	affected := make(map[string][]string)
+	err := rm.iterateStatusMappingRecords(ctx, func(ctx context.Context, smr StatusMappingRecord) (err error) {
+		if maybeCluster == nil || smr.Cluster == *maybeCluster {
+			affected[smr.Instance] = append(affected[smr.Instance], smr.Cluster)
+			_, err = rm.cli.Delete(ctx, rm.GetRealmStatusMappingRecordPrefix(smr.Instance)+smr.Cluster)
+		}
+		return err
+	})
+	if err != nil {
+		log.Printf("failed to remove outdated status mapping records: %s\n", err)
+		return nil
+	}
+	var wg sync.WaitGroup
+	rm.mutex.Lock()
+	for _, instance := range rm.instances {
+		clusters, found := affected[instance.name]
+		if !found {
+			continue
+		}
+		wg.Add(len(clusters))
+		for _, cluster := range clusters {
+			doDeploy := rm.mapping.MatchClusterToInstance(instance.name, cluster)
+			go func() {
+				defer wg.Done()
+				if doDeploy {
+					rm.deployCluster(instance, cluster)
+				} else {
+					rm.disposeCluster(instance, cluster)
+				}
+			}()
+		}
+	}
+	rm.mutex.Unlock()
+	wg.Wait()
+	return nil
+}
+
+func (rm *RealmManager) rearrangeMappings(ctx context.Context) {
+	clustersKnown, err := rm.getClustersKnown(ctx)
+	if err != nil {
+		log.Fatalf("could not get list of known clusters: %s", err)
+	}
+	clustersToDeploy := make(map[string]bool)
+	for _, c := range clustersKnown {
+		clustersToDeploy[c] = true
+	}
+	deployedMismatching := make(map[string][]string)
+	deployedMatching := make(map[string][]string)
+	err = rm.iterateStatusMappingRecords(ctx, func(ctx context.Context, smr StatusMappingRecord) error {
+		if rm.mapping.MatchClusterToInstance(smr.Instance, smr.Cluster) {
+			deployedMatching[smr.Instance] = append(deployedMatching[smr.Instance], smr.Cluster)
+		} else {
+			deployedMismatching[smr.Instance] = append(deployedMismatching[smr.Instance], smr.Cluster)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatalf("rearrangeMappings: could not iterate over status mapping records: %s", err)
+	}
+
+	var wg sync.WaitGroup
+	rm.mutex.Lock()
+
+	for _, instance := range rm.instances {
+		toDispose, found := deployedMismatching[instance.name]
+		if found {
+			for _, cluster := range toDispose {
+				go func() {
+					defer wg.Done()
+					err := rm.disposeCluster(instance, cluster)
+					if err != nil {
+						log.Printf("rearrangeMappings: failed to dispose cluster %s in realm %s for tenant %s at instance %s: %s\n", cluster, rm.Realm, rm.Tenant, instance.name, err)
+					}
+				}()
+			}
+		}
+		alreadyDeployed, found := deployedMatching[instance.name]
+		if found {
+			for _, cluster := range alreadyDeployed {
+				delete(clustersToDeploy, cluster)
+			}
+		}
+	}
+	// deploy clusters left to be deployed
+	for _, instance := range rm.instances {
+		for cluster, shouldDeployYet := range clustersToDeploy {
+			if shouldDeployYet && rm.mapping.MatchClusterToInstance(instance.name, cluster) {
+				clustersToDeploy[cluster] = false
+				go func() {
+					defer wg.Done()
+					err := rm.deployCluster(instance, cluster)
+					if err != nil {
+						log.Printf("rearrangeMappings: failed to deploy cluster %s in realm %s for tenant %s at instance %s: %s\n", cluster, rm.Realm, rm.Tenant, instance.name, err)
+					}
+				}()
+			}
+		}
+	}
+
+	rm.mutex.Unlock()
+	wg.Wait()
+}
+
+type StatusMappingRecordCb func(context.Context, StatusMappingRecord) error
+
+type StatusMappingRecord struct {
+	Instance string
+	Cluster  string
+	Hash     string
+}
+
+func (rm *RealmManager) iterateStatusMappingRecords(ctx context.Context, callback StatusMappingRecordCb) error {
+	prefixStatus := rm.EtcdKeyStore.GetRealmStatusKeyPath("")
+	rangeStart := prefixStatus
+	rangeEnd := clientv3.GetPrefixRangeEnd(rangeStart)
+	for {
+		resp, err := rm.cli.Get(ctx, rangeStart, clientv3.WithRange(rangeEnd), clientv3.WithLimit(10000))
+		if err != nil {
+			log.Fatalf("failed to iterate over status records for tenant %s cluster %s: %s", rm.Tenant, rm.Tenant, err)
+			return err
+		}
+		for _, kv := range resp.Kvs {
+			key := string(kv.Key)
+			after, found := strings.CutPrefix(key, prefixStatus)
+			// after now is supposed to match pattern "instance/INSTANCE/clusters/CLUSTER"
+			s := strings.Split(after, "/")
+			if !found || len(s) != 4 || s[0] != "instance" || s[2] != "clusters" {
+				log.Printf("iterateStatusMappingRecords: ignoring unrecognized key %s\n", key)
+				continue
+			}
+			smr := StatusMappingRecord{
+				Instance: s[1],
+				Cluster:  s[3],
+				Hash:     string(kv.Value),
+			}
+			err := callback(ctx, smr)
+			if err != nil {
+				return err
+			}
+		}
+		if resp.More {
+			rangeStart = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
+		} else {
+			break
+		}
+	}
 	return nil
 }

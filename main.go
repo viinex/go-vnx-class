@@ -48,11 +48,11 @@ func main() {
 		log.Fatal("Could not open etcd client", err)
 	}
 
-	logger := log.New(os.Stderr, "wamp ", 0)
+	//logger := log.New(os.Stderr, "[wamp] ", 0)
 
 	var cfg router.Config
 	cfg.Debug = true
-	theRouter, err := router.NewRouter(&cfg, logger)
+	theRouter, err := router.NewRouter(&cfg, nil)
 	if err != nil {
 		log.Fatal("could not create wamp router: ", err)
 	}

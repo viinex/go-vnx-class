@@ -25,7 +25,7 @@ func (imp EtcdJsonnetImporter) Import(importedFrom, importedPath string) (conten
 	}
 	k, err := imp.cli.KV.Get(context.Background(), imp.prefix+"/templates/jsonnet/"+importedPath)
 	if err != nil {
-		log.Printf("could not read jsonnet %s: %s", importedPath, err)
+		log.Printf("could not read jsonnet %s: %s\n", importedPath, err)
 		return jsonnet.Contents{}, "", err
 	}
 	if k.Count == 0 {
@@ -130,6 +130,9 @@ func (eks EtcdKeyStore) GetRealmConfigKeyPath(keyName string) string {
 func (eks EtcdKeyStore) GetRealmStatusKeyPath(keyName string) string {
 	return eks.prefix + "/status/" + eks.Tenant + "/" + eks.Realm + "/" + keyName
 }
+func (eks EtcdKeyStore) GetRealmStatusMappingRecordPrefix(instance string) string {
+	return eks.GetRealmStatusKeyPath("instance/" + instance + "/clusters/")
+}
 
 func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string) (string, error) {
 	vm := jsonnet.MakeVM()
@@ -162,7 +165,7 @@ func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string
 		for k, f := range recipe.ExtStrFile {
 			fkv, err := eks.cli.KV.Get(ctx, eks.GetRealmConfigKeyPath(f))
 			if err != nil || fkv.Count != 1 {
-				log.Printf("could not load value for ext-str-file %s: %s", f, err)
+				log.Printf("could not load value for ext-str-file %s: %s\n", f, err)
 				return "", err
 			}
 			vm.ExtVar(k, string(fkv.Kvs[0].Value))
