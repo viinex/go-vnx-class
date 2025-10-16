@@ -233,3 +233,4 @@ In particular, every viinex install has a copy of configuration file named `vnx-
 The `vnx-class-instance.json` configuration file defines three objects: a WAMP client, which maintains connection to the WAMP router within `vnx-class`, an SQLite database which is used to store the clusters' configuration, and the script which makes sure that clusters get started upon viinex startup, and re-starts the cluster when its configuration gets changed in the database. Both the database and the script are registered within WAMP client, so they can be called by `vnx-class`, and this is what actually happens when the latter detects that viinex instance gets registered, or when the cluster's configuration changes in etcd database. 
 
 Even though `vnx-class` is necessary to populate the instance-wise configuration database at viinex, -- the controller script is capable of starting previously configured clusters when `vnx-class` is unavailable.
+
