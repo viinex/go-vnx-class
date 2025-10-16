@@ -435,7 +435,7 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 }
 
 func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) error {
-	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	opCtx, opCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer opCancel()
 
 	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
@@ -475,7 +475,7 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 	return nil
 }
 func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) error {
-	opCtx, opCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	opCtx, opCancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer opCancel()
 
 	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
@@ -526,7 +526,7 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 }
 
 func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
-	opCtx, opCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer opCancel()
 	key := string(event.Kv.Key)
 	prefixClusters := rm.EtcdKeyStore.GetRealmConfigKeyPath("clusters/")
