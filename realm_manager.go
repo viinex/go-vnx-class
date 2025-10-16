@@ -475,11 +475,7 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 	return nil
 }
 func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) error {
-<<<<<<< HEAD
-	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
-=======
 	opCtx, opCancel := context.WithTimeout(context.Background(), 60*time.Second)
->>>>>>> 261d4a79e9e262cda01bf6a08a9956901bc50947
 	defer opCancel()
 
 	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
