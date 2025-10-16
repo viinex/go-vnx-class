@@ -475,7 +475,11 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 	return nil
 }
 func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) error {
+<<<<<<< HEAD
 	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
+=======
+	opCtx, opCancel := context.WithTimeout(context.Background(), 60*time.Second)
+>>>>>>> 261d4a79e9e262cda01bf6a08a9956901bc50947
 	defer opCancel()
 
 	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
@@ -526,7 +530,7 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 }
 
 func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
-	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	opCtx, opCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer opCancel()
 	key := string(event.Kv.Key)
 	prefixClusters := rm.EtcdKeyStore.GetRealmConfigKeyPath("clusters/")
@@ -628,6 +632,7 @@ func (rm *RealmManager) rearrangeMappings(ctx context.Context) {
 	for _, instance := range rm.instances {
 		toDispose, found := deployedMismatching[instance.name]
 		if found {
+			wg.Add(len(toDispose))
 			for _, cluster := range toDispose {
 				go func() {
 					defer wg.Done()
@@ -650,6 +655,7 @@ func (rm *RealmManager) rearrangeMappings(ctx context.Context) {
 		for cluster, shouldDeployYet := range clustersToDeploy {
 			if shouldDeployYet && rm.mapping.MatchClusterToInstance(instance.name, cluster) {
 				clustersToDeploy[cluster] = false
+				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					err := rm.deployCluster(instance, cluster)
