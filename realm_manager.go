@@ -7,13 +7,18 @@ import (
 
 	//"github.com/gammazero/nexus/v3/client"
 	//"github.com/gammazero/nexus/v3/router"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -28,32 +33,35 @@ import (
 
 type RealmManager struct {
 	EtcdKeyStore
-	mapping Mapping
+	mapping       Mapping
+	prometheusUrl string
 
 	wampClient *client.Client
 	quit       chan struct{}
 	regEvents  chan *wamp.Event
 	watchChan  clientv3.WatchChan
 
-	instances        map[wamp.ID]*InstanceInfo
-	clusters         map[wamp.ID]*ClusterInfo
-	metricsProviders map[wamp.ID]wamp.URI
+	instances map[wamp.ID]*InstanceInfo
+	clusters  map[wamp.ID]*ClusterInfo
 
 	mutex sync.RWMutex
 }
 
 type InstanceInfo struct {
-	name string
-	uri  wamp.URI
+	name       string
+	uri        wamp.URI
+	deregister chan struct{}
 
 	endpoints *VnxclassEndpoints
 }
 
 type ClusterInfo struct {
-	name string
-	uri  wamp.URI
+	name       string
+	uri        wamp.URI
+	deregister chan struct{}
 
-	endpoints *[]SvcEntry
+	endpoints        []SvcEntry
+	metricsExporters []string
 }
 
 type RealmManagers struct {
@@ -62,7 +70,7 @@ type RealmManagers struct {
 
 func (rms RealmManagers) Close() error {
 	for _, rm := range rms.realmManagers {
-		rm.quit <- struct{}{}
+		close(rm.quit)
 	}
 	return nil
 }
@@ -128,22 +136,22 @@ FOR:
 	}
 }
 
-func (rms RealmManagers) RealmManager(eks EtcdKeyStore, wampClient *client.Client) (*RealmManager, error) {
+func (rms RealmManagers) RealmManager(eks EtcdKeyStore, wampClient *client.Client, prometheusUrl string) (*RealmManager, error) {
 	watchChan := eks.cli.Watcher.Watch(context.Background(), eks.GetRealmConfigKeyPath(""), clientv3.WithPrefix())
 	mapping, err := eks.LoadMapping(context.Background(), nil)
 	if err != nil {
 		return nil, err
 	}
 	rm := RealmManager{
-		EtcdKeyStore:     eks,
-		wampClient:       wampClient,
-		mapping:          mapping,
-		quit:             make(chan struct{}),
-		regEvents:        make(chan *wamp.Event, 100),
-		watchChan:        watchChan,
-		instances:        make(map[wamp.ID]*InstanceInfo),
-		clusters:         make(map[wamp.ID]*ClusterInfo),
-		metricsProviders: make(map[wamp.ID]wamp.URI),
+		EtcdKeyStore:  eks,
+		wampClient:    wampClient,
+		mapping:       mapping,
+		prometheusUrl: prometheusUrl,
+		quit:          make(chan struct{}),
+		regEvents:     make(chan *wamp.Event, 100),
+		watchChan:     watchChan,
+		instances:     make(map[wamp.ID]*InstanceInfo),
+		clusters:      make(map[wamp.ID]*ClusterInfo),
 	}
 	rms.realmManagers = append(rms.realmManagers, &rm)
 	go rm.RunManageRealm()
@@ -185,8 +193,9 @@ func (rm *RealmManager) registerInstance(uri wamp.URI, id wamp.ID, instance stri
 		return errors.New("registration already present for the instance")
 	}
 	rm.instances[id] = &InstanceInfo{
-		uri:  uri,
-		name: instance,
+		uri:        uri,
+		name:       instance,
+		deregister: make(chan struct{}),
 	}
 	log.Printf("RealmManager.registerInstance: added registration %d for instance %s at %s\n", id, instance, uri)
 	return nil
@@ -199,8 +208,9 @@ func (rm *RealmManager) registerCluster(uri wamp.URI, id wamp.ID, cluster string
 		return errors.New("registration already present for the cluster")
 	}
 	rm.clusters[id] = &ClusterInfo{
-		uri:  uri,
-		name: cluster,
+		uri:        uri,
+		name:       cluster,
+		deregister: make(chan struct{}),
 	}
 	log.Printf("RealmManager.registerCluster: added registration %d for cluster %s at %s\n", id, cluster, uri)
 	return nil
@@ -211,12 +221,14 @@ func (rm *RealmManager) deregister(id wamp.ID) {
 	defer rm.mutex.Unlock()
 	instance, ok := rm.instances[id]
 	if ok {
+		close(instance.deregister)
 		delete(rm.instances, id)
 		log.Printf("RealmManager.deregister: removed registration %d for instance %s at %s\n", id, instance.name, instance.uri)
 		return
 	}
 	cluster, ok := rm.clusters[id]
 	if ok {
+		close(cluster.deregister)
 		delete(rm.clusters, id)
 		log.Printf("RealmManager.deregister: removed registration %d for cluster %s at %s\n", id, cluster.name, cluster.uri)
 		return
@@ -235,6 +247,7 @@ func (rm *RealmManager) registrationAlive(id wamp.ID) {
 	cluster, ok := rm.clusters[id]
 	if ok {
 		log.Printf("RealmManager.registrationAlive: registration %d for cluster %s at %s\n", id, cluster.name, cluster.uri)
+		go rm.handleClusterAlive(cluster)
 		return
 	}
 }
@@ -437,6 +450,95 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 		Apart from that, if config changes, remove cluster's record from /status
 		If mapping changes, remove the whole /status
 	*/
+}
+
+func (rm *RealmManager) handleClusterAlive(cluster *ClusterInfo) {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer opCancel()
+	if cluster.endpoints == nil {
+		uriSvc := string(cluster.uri) + ".svc"
+
+		resSvc, err := rm.wampClient.Call(opCtx, uriSvc, nil, nil, nil, nil)
+		if err != nil {
+			cluster.endpoints = make([]SvcEntry, 0, 1)
+			log.Printf("failed to call svc on cluster %s at instance %s of tenant %s: %s", cluster.uri, rm.Realm, rm.Tenant, err)
+			return
+		}
+
+		svc, ok := ParseSvc(resSvc)
+		if !ok {
+			log.Printf("could not recognize response to svc call on cluster %s at instance %s of tenant %s", cluster.uri, rm.Realm, rm.Tenant)
+			return
+		}
+		cluster.endpoints = svc
+	}
+	for _, ep := range cluster.endpoints {
+		if ep.EndpointType == "MetricsExporter" {
+			cluster.metricsExporters = append(cluster.metricsExporters, ep.ObjectName)
+		}
+	}
+	if len(cluster.metricsExporters) > 0 && rm.prometheusUrl != "" {
+		go rm.exportClusterMetrics(cluster)
+	}
+}
+
+func (rm *RealmManager) exportClusterMetrics(cluster *ClusterInfo) {
+	for {
+		select {
+		case <-cluster.deregister:
+			return
+		case <-rm.quit:
+			return
+		case <-rm.wampClient.Done():
+			return
+		case <-time.After(30 * time.Second):
+			for _, exporter := range cluster.metricsExporters {
+				opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer opCancel()
+				res, err := rm.wampClient.Call(opCtx, string(cluster.uri)+"."+exporter+".sample", nil, wamp.List{}, nil, nil)
+				if err != nil {
+					log.Printf("failed to sample metrics from %s in cluster %s in realm %s of tenant %s: %s", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+					continue
+				}
+				var b64gzmetrics string
+				err = DecodeViaJSON(res, &b64gzmetrics)
+				if err != nil {
+					log.Printf("failed to parse results of sampling metrics from %s in cluster %s in realm %s of tenant %s: %s", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+					continue
+				}
+				decodedBytes, err := base64.StdEncoding.DecodeString(b64gzmetrics)
+				if err != nil {
+					log.Printf("error decoding base64 while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+					continue
+				}
+				gzipReader, err := gzip.NewReader(bytes.NewReader(decodedBytes))
+				if err != nil {
+					log.Fatalf("Error creating gzip reader: %v", err)
+				}
+				defer gzipReader.Close()
+				decompressedBytes, err := io.ReadAll(gzipReader)
+				if err != nil {
+					log.Printf("error decompressing gzip exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+					continue
+				}
+				log.Printf("received %d and decoded %d bytes of metrics from %s", len(b64gzmetrics), len(decompressedBytes), exporter)
+
+				req, err := http.NewRequestWithContext(opCtx, "POST", rm.prometheusUrl, bytes.NewBuffer(decompressedBytes))
+				if err != nil {
+					log.Fatalf("Error creating http request: %v", err)
+				}
+
+				// Set the Content-Type header to indicate JSON data
+				req.Header.Set("Content-Type", "text/plain")
+				client := &http.Client{}
+				resp, err := client.Do(req)
+				if err != nil {
+					log.Printf("http client yield an error while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+				}
+				defer resp.Body.Close()
+			}
+		}
+	}
 }
 
 func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) error {

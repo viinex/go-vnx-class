@@ -71,7 +71,7 @@ func main() {
 		log.Fatal("failed to build map of tenants and projects: ", err)
 	}
 
-	closer, err := imp.PopulateWampRealms(theRouter, tenantProjectsMap)
+	closer, err := imp.PopulateWampRealms(theRouter, tenantProjectsMap, config.Prometheus)
 	if err != nil {
 		log.Fatal("could not populate wamp realms: ", err)
 	}

@@ -164,7 +164,7 @@ func (ksi EtcdKeyStore) Provider() string {
 	return "EtcdKeyStore"
 }
 
-func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string) (io.Closer, error) {
+func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string, prometheusUrl string) (io.Closer, error) {
 	rms := RealmManagers{}
 	for tenant, projects := range tenantProjectsMap {
 		for _, project := range projects {
@@ -197,7 +197,7 @@ func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjects
 				return nil, fmt.Errorf("could not register com.viinex.infra.get_cluster_config: %w", err)
 			}
 
-			rm, err := rms.RealmManager(eks, wampClient)
+			rm, err := rms.RealmManager(eks, wampClient, prometheusUrl)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create realm manager: %w", err)
 			}
