@@ -160,7 +160,7 @@ func (eks *EtcdKeyStore) LoadMapping(ctx context.Context, mappingYaml *[]byte) (
 	if mappingYaml == nil {
 		mappingResp, err := eks.cli.KV.Get(ctx, eks.GetRealmConfigKeyPath("mapping.yaml"))
 		if err != nil {
-			return nil, fmt.Errorf("fail to contact etcd: %w", err)
+			return nil, fmt.Errorf("failed to contact etcd: %w", err)
 		}
 		if len(mappingResp.Kvs) != 0 {
 			mappingYaml = &(mappingResp.Kvs[0].Value)
@@ -375,20 +375,22 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 	for _, cp := range clustersProjected {
 		delete(clustersToDispose, cp)
 	}
-	var wg sync.WaitGroup
-	wg.Add(len(clustersToDispose))
-	log.Printf("going to dispose clusters %v previously known to instance %s\n", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
-	for cluster := range clustersToDispose {
-		go func() {
-			defer wg.Done()
-			err := rm.disposeCluster(instance, cluster)
-			if err != nil {
-				log.Printf("failed to dispose cluster %s at instance %s: %s\n", cluster, instance.name, err)
-			}
-		}()
+	if len(clustersToDispose) > 0 {
+		var wg sync.WaitGroup
+		wg.Add(len(clustersToDispose))
+		log.Printf("going to dispose clusters %v previously known to instance %s\n", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
+		for cluster := range clustersToDispose {
+			go func() {
+				defer wg.Done()
+				err := rm.disposeCluster(instance, cluster)
+				if err != nil {
+					log.Printf("failed to dispose cluster %s at instance %s: %s\n", cluster, instance.name, err)
+				}
+			}()
+		}
+		wg.Wait()
+		log.Printf("disposed clusters %v previously known to instance %s\n", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
 	}
-	wg.Wait()
-	log.Printf("disposed clusters %v previously known to instance %s\n", slices.Collect(maps.Keys(clustersToDispose)), instance.name)
 
 	clustersToDeploy := make(map[string]bool)
 	for _, cluster := range clustersProjected {
@@ -399,19 +401,22 @@ func (rm *RealmManager) handleInstanceAlive(instance *InstanceInfo) {
 		}
 	}
 
-	wg.Add(len(clustersToDeploy))
-	log.Printf("going to deploy clusters %v to instance %s", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
-	for cluster := range clustersToDeploy {
-		go func() {
-			defer wg.Done()
-			err := rm.deployCluster(instance, cluster)
-			if err != nil {
-				log.Printf("failed to deploy cluster %s to instance %s: %s\n", cluster, instance.name, err)
-			}
-		}()
+	if len(clustersToDeploy) > 0 {
+		var wg sync.WaitGroup
+		wg.Add(len(clustersToDeploy))
+		log.Printf("going to deploy clusters %v to instance %s", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
+		for cluster := range clustersToDeploy {
+			go func() {
+				defer wg.Done()
+				err := rm.deployCluster(instance, cluster)
+				if err != nil {
+					log.Printf("failed to deploy cluster %s to instance %s: %s\n", cluster, instance.name, err)
+				}
+			}()
+		}
+		wg.Wait()
+		log.Printf("deployed clusters %v to instance %s\n", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
 	}
-	wg.Wait()
-	log.Printf("deployed clusters %v to instance %s\n", slices.Collect(maps.Keys(clustersToDeploy)), instance.name)
 	/*
 		LIST 0: get list of cluster configs from etcd (/config/T/P/*.yaml)
 		LIST 1: get list of clusters assigned to this instance from etcd (/status/T/P/instance/instance.name/*) along with their hashes (keys)
@@ -478,6 +483,21 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	opCtx, opCancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer opCancel()
 
+	// read out and generate cluster config BEFORE calling the prepare on controller script at viinex instance
+	// because this can be lengthy, and config change by controller script is a 2phase commit transaction and
+	// has timeout of 30 seconds
+	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
+	configPath := GetDbPathClusterConfig(instance.name, cluster)
+
+	config, err := rm.EtcdKeyStore.GetClusterConfig(opCtx, cluster)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	h.Write([]byte(config))
+	hash := hex.EncodeToString(h.Sum(nil))
+
+	// initiate transaction ("prepare")
 	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
 		wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster, "intent": "deploy"}}, nil, nil)
 	if err != nil {
@@ -491,18 +511,7 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	if !prepared {
 		return fmt.Errorf("controller script at instance %s declined prepare call to deploy cluster %s", instance.name, cluster)
 	}
-
-	hashPath := GetDbPathClusterConfigHash(instance.name, cluster)
-	configPath := GetDbPathClusterConfig(instance.name, cluster)
-
-	config, err := rm.EtcdKeyStore.GetClusterConfig(opCtx, cluster)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	h.Write([]byte(config))
-	hash := hex.EncodeToString(h.Sum(nil))
-
+	// populate the remote database with config data and its hash
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".put", nil, wamp.List{configPath, config}, nil, nil)
 	if err != nil {
 		return err
@@ -511,11 +520,14 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	if err != nil {
 		return err
 	}
+	// commit the remote transaction ("deploy")
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
 		wamp.List{wamp.Dict{"method": "deploy", "cluster": cluster}}, nil, nil)
 	if err != nil {
 		return err
 	}
+
+	// and record the confirmation in ETCD that config with said hash has been pushed and deployed
 	statusPath := rm.EtcdKeyStore.GetRealmStatusMappingRecordPrefix(instance.name) + cluster
 	_, err = rm.EtcdKeyStore.cli.KV.Put(opCtx, statusPath, hash)
 	if err != nil {
@@ -535,8 +547,10 @@ func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
 	if key == pathRecipeYaml {
 		// when recipe gets changed we assume all configs should be re-generated and re-deployed
 		// might optimize this later
+		log.Printf("Detected possible change of config generation RECIPE in realm %s of tenant %s", rm.Realm, rm.Tenant)
 		rm.handleClusterConfigChange(opCtx, nil)
 	} else if key == pathMappingYaml {
+		log.Printf("Detected possible change of cluster-to-instance MAPPING in realm %s of tenant %s", rm.Realm, rm.Tenant)
 		var mapping Mapping
 		if event.Type == clientv3.EventTypeDelete {
 			mapping = MappingNone{}
@@ -556,6 +570,7 @@ func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
 	} else if after, found := strings.CutPrefix(key, prefixClusters); found {
 		cluster, found := strings.CutSuffix(after, ".yaml")
 		if found {
+			log.Printf("Detected possible change of CONFIG for cluster %s in realm %s of tenant %s", cluster, rm.Realm, rm.Tenant)
 			rm.handleClusterConfigChange(opCtx, &cluster)
 		}
 	}
