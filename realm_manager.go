@@ -692,18 +692,18 @@ func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeClus
 		log.Printf("failed to remove outdated status mapping records: %s\n", err)
 		return nil
 	}
-	var wg sync.WaitGroup
+	//var wg sync.WaitGroup
 	rm.mutex.Lock()
 	for _, instance := range rm.instances {
 		clusters, found := affected[instance.name]
 		if !found {
 			continue
 		}
-		wg.Add(len(clusters))
+		//wg.Add(len(clusters))
 		for _, cluster := range clusters {
 			doDeploy := rm.mapping.MatchClusterToInstance(instance.name, cluster)
 			go func() {
-				defer wg.Done()
+				//defer wg.Done()
 				if doDeploy {
 					rm.deployCluster(instance, cluster)
 				} else {
@@ -713,7 +713,7 @@ func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeClus
 		}
 	}
 	rm.mutex.Unlock()
-	wg.Wait()
+	//wg.Wait()
 	return nil
 }
 
