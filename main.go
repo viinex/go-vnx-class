@@ -14,12 +14,12 @@ import (
 )
 
 type Config struct {
-	Etcd       etcdv3.Config `json:"etcd"`
-	EtcdPrefix string        `json:"etcd-prefix"`
-	Wamp       string        `json:"wamp"`
-	Prometheus string        `json:"prometheus-push-uri"`
-	Static     string        `json:"static"`
-	Debug      bool          `json:"debug"`
+	Etcd       etcdv3.Config `yaml:"etcd"`
+	EtcdPrefix string        `yaml:"etcd-prefix"`
+	Wamp       string        `yaml:"wamp"`
+	Prometheus string        `yaml:"prometheus-push-uri"`
+	Static     string        `yaml:"static"`
+	Debug      bool          `yaml:"debug"`
 }
 
 func main() {
