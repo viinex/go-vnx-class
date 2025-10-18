@@ -15,7 +15,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -483,6 +482,7 @@ func (rm *RealmManager) handleClusterAlive(cluster *ClusterInfo) {
 }
 
 func (rm *RealmManager) exportClusterMetrics(cluster *ClusterInfo) {
+	debugPrintOnce := true
 	for {
 		select {
 		case <-cluster.deregister:
@@ -516,24 +516,25 @@ func (rm *RealmManager) exportClusterMetrics(cluster *ClusterInfo) {
 					log.Fatalf("Error creating gzip reader: %v", err)
 				}
 				defer gzipReader.Close()
-				decompressedBytes, err := io.ReadAll(gzipReader)
-				if err != nil {
-					log.Printf("error decompressing gzip exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
-					continue
-				}
-				log.Printf("received %d and decoded %d bytes of metrics from %s", len(b64gzmetrics), len(decompressedBytes), exporter)
 
-				req, err := http.NewRequestWithContext(opCtx, "POST", rm.prometheusUrl, bytes.NewBuffer(decompressedBytes))
+				if debugPrintOnce {
+					log.Printf("metrics exporter: first iteration, received %d compressed bytes from %s at cluster %s in realm %s of tenant %s",
+						len(b64gzmetrics), exporter, cluster.name, rm.Realm, rm.Tenant)
+					debugPrintOnce = false
+				}
+
+				req, err := http.NewRequestWithContext(opCtx, "POST", rm.prometheusUrl, gzipReader)
 				if err != nil {
 					log.Fatalf("Error creating http request: %v", err)
 				}
 
-				// Set the Content-Type header to indicate JSON data
 				req.Header.Set("Content-Type", "text/plain")
 				client := &http.Client{}
 				resp, err := client.Do(req)
 				if err != nil {
-					log.Printf("http client yield an error while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+					log.Printf("http client yield an error while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v",
+						exporter, cluster.name, rm.Realm, rm.Tenant, err)
+					continue
 				}
 				defer resp.Body.Close()
 			}
