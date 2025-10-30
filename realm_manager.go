@@ -494,7 +494,6 @@ func (rm *RealmManager) exportClusterMetrics(cluster *ClusterInfo) {
 		case <-time.After(30 * time.Second):
 			for _, exporter := range cluster.metricsExporters {
 				rm.exportClusterMetricsStep(cluster, exporter, &debugPrintOnce)
-				debugPrintOnce = true
 			}
 		}
 	}
@@ -524,10 +523,12 @@ func (rm *RealmManager) exportClusterMetricsStep(cluster *ClusterInfo, exporter 
 	}
 	defer gzipReader.Close()
 
-	if debugPrintOnce != nil && *debugPrintOnce {
+	if debugPrintOnce == nil || (debugPrintOnce != nil && *debugPrintOnce) {
 		log.Printf("metrics exporter: first iteration, received %d compressed bytes from %s at cluster %s in realm %s of tenant %s",
 			len(b64gzmetrics), exporter, cluster.name, rm.Realm, rm.Tenant)
-		*debugPrintOnce = false
+		if debugPrintOnce != nil {
+			*debugPrintOnce = false
+		}
 	}
 
 	req, err := http.NewRequestWithContext(opCtx, "POST", rm.prometheusUrl, gzipReader)
