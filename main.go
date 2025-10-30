@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	//"github.com/gammazero/nexus/v3/client"
 	"github.com/gammazero/nexus/v3/router"
@@ -22,7 +24,7 @@ type Config struct {
 	Debug      bool          `yaml:"debug"`
 }
 
-func main() {
+func BuildConfig(configPath string) (*Config, error) {
 	config := Config{
 		Etcd: etcdv3.Config{
 			Endpoints: []string{"127.0.0.1:2379"},
@@ -31,21 +33,53 @@ func main() {
 		Static: "/usr/share/viinex/web/browser/en",
 		Debug:  false,
 	}
-
-	configPath := flag.String("config", "vnxclass.yaml", "Path to configuration file")
-	flag.Parse()
-
-	if *configPath != "" {
-		confBytes, err := os.ReadFile(*configPath)
+	if configPath != "" {
+		confBytes, err := os.ReadFile(configPath)
 		if err != nil {
-			log.Fatal("could not read config: ", err)
+			return nil, fmt.Errorf("failed to read config file %s: %w", configPath, err)
 		}
 		err = yaml.Unmarshal(confBytes, &config)
 		if err != nil {
-			log.Fatal("could not deserialize config: ", err)
+			return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 		}
 	}
-	log.Print("=============new run")
+
+	envEtcdEndpoints := os.Getenv("ETCD_ENDPOINTS")
+	if envEtcdEndpoints != "" {
+		config.Etcd.Endpoints = strings.Split(envEtcdEndpoints, ",")
+	}
+	maybeSetFromEnv("ETCD_USERNAME", &config.Etcd.Username)
+	maybeSetFromEnv("ETCD_PASSWORD", &config.Etcd.Password)
+	maybeSetFromEnv("ETCD_PREFIX", &config.EtcdPrefix)
+	maybeSetFromEnv("WAMP", &config.Wamp)
+	maybeSetFromEnv("PROMETHEUS_PUSH_URI", &config.Prometheus)
+	maybeSetFromEnv("STATIC", &config.Static)
+	envDebug := os.Getenv("DEBUG")
+	if envDebug != "" && envDebug != "0" {
+		config.Debug = true
+	}
+
+	return &config, nil
+}
+
+func maybeSetFromEnv(env string, dest *string) {
+	val := os.Getenv(env)
+	if val != "" {
+		*dest = val
+	}
+}
+
+func main() {
+	configPath := flag.String("config", "", "Path to configuration file")
+	flag.Parse()
+
+	config, err := BuildConfig(*configPath)
+	if err != nil {
+
+	}
+
+	log.SetFlags(0)
+	log.Print("==== vnx-class new run")
 	cli, err := etcdv3.New(config.Etcd)
 	if err != nil {
 		log.Fatal("Could not open etcd client", err)
@@ -57,7 +91,7 @@ func main() {
 
 	var cfg router.Config
 	cfg.Debug = config.Debug
-	theRouter, err := router.NewRouter(&cfg, nil)
+	theRouter, err := router.NewRouter(&cfg, log.Default())
 	if err != nil {
 		log.Fatal("could not create wamp router: ", err)
 	}
@@ -88,8 +122,6 @@ func main() {
 	if err != nil {
 		log.Fatal("could not serve http: ", err)
 	}
-
-	//defer closer.Close()
 
 	quit := make(chan string)
 	<-quit
