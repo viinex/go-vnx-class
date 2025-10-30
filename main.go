@@ -45,10 +45,13 @@ func main() {
 			log.Fatal("could not deserialize config: ", err)
 		}
 	}
+	log.Print("=============new run")
 	cli, err := etcdv3.New(config.Etcd)
 	if err != nil {
 		log.Fatal("Could not open etcd client", err)
 	}
+
+	log.Print("connected to etcd")
 
 	//logger := log.New(os.Stderr, "[wamp] ", 0)
 

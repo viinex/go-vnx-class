@@ -493,53 +493,58 @@ func (rm *RealmManager) exportClusterMetrics(cluster *ClusterInfo) {
 			return
 		case <-time.After(30 * time.Second):
 			for _, exporter := range cluster.metricsExporters {
-				opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer opCancel()
-				res, err := rm.wampClient.Call(opCtx, string(cluster.uri)+"."+exporter+".sample", nil, wamp.List{}, nil, nil)
-				if err != nil {
-					log.Printf("failed to sample metrics from %s in cluster %s in realm %s of tenant %s: %s", exporter, cluster.name, rm.Realm, rm.Tenant, err)
-					continue
-				}
-				var b64gzmetrics string
-				err = DecodeViaJSON(res, &b64gzmetrics)
-				if err != nil {
-					log.Printf("failed to parse results of sampling metrics from %s in cluster %s in realm %s of tenant %s: %s", exporter, cluster.name, rm.Realm, rm.Tenant, err)
-					continue
-				}
-				decodedBytes, err := base64.StdEncoding.DecodeString(b64gzmetrics)
-				if err != nil {
-					log.Printf("error decoding base64 while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
-					continue
-				}
-				gzipReader, err := gzip.NewReader(bytes.NewReader(decodedBytes))
-				if err != nil {
-					log.Fatalf("Error creating gzip reader: %v", err)
-				}
-				defer gzipReader.Close()
-
-				if debugPrintOnce {
-					log.Printf("metrics exporter: first iteration, received %d compressed bytes from %s at cluster %s in realm %s of tenant %s",
-						len(b64gzmetrics), exporter, cluster.name, rm.Realm, rm.Tenant)
-					debugPrintOnce = false
-				}
-
-				req, err := http.NewRequestWithContext(opCtx, "POST", rm.prometheusUrl, gzipReader)
-				if err != nil {
-					log.Fatalf("Error creating http request: %v", err)
-				}
-
-				req.Header.Set("Content-Type", "text/plain")
-				client := &http.Client{}
-				resp, err := client.Do(req)
-				if err != nil {
-					log.Printf("http client yield an error while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v",
-						exporter, cluster.name, rm.Realm, rm.Tenant, err)
-					continue
-				}
-				defer resp.Body.Close()
+				rm.exportClusterMetricsStep(cluster, exporter, &debugPrintOnce)
+				debugPrintOnce = true
 			}
 		}
 	}
+}
+func (rm *RealmManager) exportClusterMetricsStep(cluster *ClusterInfo, exporter string, debugPrintOnce *bool) error {
+	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer opCancel()
+	res, err := rm.wampClient.Call(opCtx, string(cluster.uri)+"."+exporter+".sample", nil, wamp.List{}, nil, nil)
+	if err != nil {
+		log.Printf("failed to sample metrics from %s in cluster %s in realm %s of tenant %s: %s", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+		return err
+	}
+	var b64gzmetrics string
+	err = DecodeViaJSON(res, &b64gzmetrics)
+	if err != nil {
+		log.Printf("failed to parse results of sampling metrics from %s in cluster %s in realm %s of tenant %s: %s", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+		return err
+	}
+	decodedBytes, err := base64.StdEncoding.DecodeString(b64gzmetrics)
+	if err != nil {
+		log.Printf("error decoding base64 while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v", exporter, cluster.name, rm.Realm, rm.Tenant, err)
+		return err
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(decodedBytes))
+	if err != nil {
+		log.Fatalf("Error creating gzip reader: %v", err)
+	}
+	defer gzipReader.Close()
+
+	if debugPrintOnce != nil && *debugPrintOnce {
+		log.Printf("metrics exporter: first iteration, received %d compressed bytes from %s at cluster %s in realm %s of tenant %s",
+			len(b64gzmetrics), exporter, cluster.name, rm.Realm, rm.Tenant)
+		*debugPrintOnce = false
+	}
+
+	req, err := http.NewRequestWithContext(opCtx, "POST", rm.prometheusUrl, gzipReader)
+	if err != nil {
+		log.Fatalf("Error creating http request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "text/plain")
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("http client yield an error while exporting metrics from %s in cluster %s in realm %s of tenant %s: %v",
+			exporter, cluster.name, rm.Realm, rm.Tenant, err)
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) error {
