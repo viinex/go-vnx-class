@@ -164,50 +164,85 @@ func (ksi EtcdKeyStore) Provider() string {
 	return "EtcdKeyStore"
 }
 
+func (rms *RealmManagers) createRealmManager(theRouter router.Router, prometheusUrl string, eks EtcdKeyStore) error {
+	rms.mutex.Lock()
+	for _, rm := range rms.realmManagers {
+		if rm.Tenant == eks.Tenant && rm.Realm == eks.Realm {
+			rms.mutex.Unlock()
+			return nil // not an error: realm already exists, we may receive update on recipe.yaml change here
+		}
+	}
+	rms.mutex.Unlock()
+
+	rcfg := router.RealmConfig{
+		URI:           wamp.URI(eks.Realm),
+		AnonymousAuth: false,
+	}
+
+	rcfg.Authenticators = append(rcfg.Authenticators, auth.NewCryptoSignAuthenticator(eks, 0))
+	rcfg.Authorizer = ViinexAuthorizer{permissions: defaultViinexPermissions()}
+
+	ccfg := client.Config{
+		Realm: eks.Realm,
+	}
+	err := theRouter.AddRealm(&rcfg)
+	if err != nil {
+		return fmt.Errorf("could not add realm: %w", err)
+	}
+	// create a local client and register infra endpoints
+	wampClient, err := client.ConnectLocal(theRouter, ccfg)
+	if err != nil {
+		theRouter.RemoveRealm(rcfg.URI)
+		return fmt.Errorf("could not create a local client on realm %s: %w", ccfg.Realm, err)
+	}
+	// wampClient.Close() should be called at some point
+	err = wampClient.Register("com.viinex.infra.get_cluster_config", eks.GetClusterConfigHandler, nil)
+	if err != nil {
+		wampClient.Close()
+		theRouter.RemoveRealm(rcfg.URI)
+		return fmt.Errorf("could not register com.viinex.infra.get_cluster_config: %w", err)
+	}
+
+	rm, err := rms.CreateRealmManager(eks, wampClient, prometheusUrl)
+	if err != nil {
+		wampClient.Close()
+		theRouter.RemoveRealm(rcfg.URI)
+		return fmt.Errorf("failed to create realm manager: %w", err)
+	}
+
+	rm.mutex.Lock()
+	rm.realmCloser = func() { theRouter.RemoveRealm(rcfg.URI) }
+	rm.mutex.Unlock()
+	return nil
+}
+
 func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjectsMap map[string][]string, prometheusUrl string) (io.Closer, error) {
 	rms := RealmManagers{}
+	rms.cancelEtcdWatch = imp.WatchTenantAndProjectChanges(func(tenant string, project string) {
+		var eks EtcdKeyStore
+		eks.cli = imp.cli
+		eks.Tenant = tenant
+		eks.Realm = project
+		err := rms.createRealmManager(theRouter, prometheusUrl, eks)
+		if err != nil {
+			log.Printf("failed to create launch manager for realm %s of tenant %s: %s", eks.Realm, eks.Tenant, err)
+			// and what? retry over time?
+		}
+	})
 	for tenant, projects := range tenantProjectsMap {
 		for _, project := range projects {
 			var eks EtcdKeyStore
 			eks.cli = imp.cli
 			eks.Tenant = tenant
 			eks.Realm = project
-			rcfg := router.RealmConfig{
-				URI:           wamp.URI(project),
-				AnonymousAuth: false,
-			}
-
-			rcfg.Authenticators = append(rcfg.Authenticators, auth.NewCryptoSignAuthenticator(eks, 0))
-			rcfg.Authorizer = ViinexAuthorizer{permissions: defaultViinexPermissions()}
-			err := theRouter.AddRealm(&rcfg)
+			err := rms.createRealmManager(theRouter, prometheusUrl, eks)
 			if err != nil {
-				return nil, fmt.Errorf("could not add realm: %w", err)
-			}
-			ccfg := client.Config{
-				Realm: project,
-			}
-			// create a local client and register infra endpoints
-			wampClient, err := client.ConnectLocal(theRouter, ccfg)
-			if err != nil {
-				return nil, fmt.Errorf("could not create a local client on realm %s: %w", ccfg.Realm, err)
-			}
-			// wampClient.Close() should be called at some point
-			err = wampClient.Register("com.viinex.infra.get_cluster_config", eks.GetClusterConfigHandler, nil)
-			if err != nil {
-				return nil, fmt.Errorf("could not register com.viinex.infra.get_cluster_config: %w", err)
-			}
-
-			rm, err := rms.RealmManager(eks, wampClient, prometheusUrl)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create realm manager: %w", err)
-			}
-			err = wampClient.SubscribeChan("wamp.registration", rm.regEvents, wamp.Dict{"match": "prefix"})
-			if err != nil {
-				return nil, fmt.Errorf("could not subscribe for registration events in realm: %w", err)
+				log.Printf("failed to create launch manager for realm %s of tenant %s: %s", eks.Realm, eks.Tenant, err)
+				// and what? retry over time?
 			}
 		}
 	}
-	return rms, nil
+	return &rms, nil
 }
 
 const ErrWampInfraHanlerFailed wamp.URI = "com.viinex.infra.failed"

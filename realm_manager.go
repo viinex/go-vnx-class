@@ -35,15 +35,16 @@ type RealmManager struct {
 	mapping       Mapping
 	prometheusUrl string
 
-	wampClient *client.Client
-	quit       chan struct{}
-	regEvents  chan *wamp.Event
-	watchChan  clientv3.WatchChan
+	wampClient  *client.Client
+	quit        chan struct{}
+	regEvents   chan *wamp.Event
+	watchChan   clientv3.WatchChan
+	realmCloser func()
 
-	instances map[wamp.ID]*InstanceInfo
-	clusters  map[wamp.ID]*ClusterInfo
-
-	mutex sync.RWMutex
+	instances     map[wamp.ID]*InstanceInfo
+	clusters      map[wamp.ID]*ClusterInfo
+	realmManagers *RealmManagers
+	mutex         sync.RWMutex
 }
 
 type InstanceInfo struct {
@@ -64,14 +65,37 @@ type ClusterInfo struct {
 }
 
 type RealmManagers struct {
-	realmManagers []*RealmManager
+	realmManagers   []*RealmManager
+	cancelEtcdWatch context.CancelFunc
+	mutex           sync.Mutex
 }
 
-func (rms RealmManagers) Close() error {
-	for _, rm := range rms.realmManagers {
-		close(rm.quit)
+func (rms *RealmManagers) Close() error {
+	rms.mutex.Lock()
+	if nil != rms.cancelEtcdWatch {
+		rms.cancelEtcdWatch()
+	}
+	managers := rms.realmManagers
+	rms.realmManagers = nil
+	rms.cancelEtcdWatch = nil
+	rms.mutex.Unlock()
+	for _, rm := range managers {
+		rm.Close()
 	}
 	return nil
+}
+
+func (rms *RealmManagers) remove(target *RealmManager) {
+	rms.mutex.Lock()
+	defer rms.mutex.Unlock()
+	for index, rm := range rms.realmManagers {
+		if rm.Tenant == target.Tenant && rm.Realm == target.Realm {
+			rms.realmManagers = append(rms.realmManagers[:index], rms.realmManagers[index+1:]...)
+			log.Printf("removing realm manager for realm %s of tenant %s. %d realm managers left",
+				rm.Realm, rm.Tenant, len(rms.realmManagers))
+			return
+		}
+	}
 }
 
 func (rm *RealmManager) RunManageRealm() {
@@ -135,7 +159,7 @@ FOR:
 	}
 }
 
-func (rms RealmManagers) RealmManager(eks EtcdKeyStore, wampClient *client.Client, prometheusUrl string) (*RealmManager, error) {
+func (rms *RealmManagers) CreateRealmManager(eks EtcdKeyStore, wampClient *client.Client, prometheusUrl string) (*RealmManager, error) {
 	watchChan := eks.cli.Watcher.Watch(context.Background(), eks.GetRealmConfigKeyPath(""), clientv3.WithPrefix())
 	mapping, err := eks.LoadMapping(context.Background(), nil)
 	if err != nil {
@@ -151,7 +175,14 @@ func (rms RealmManagers) RealmManager(eks EtcdKeyStore, wampClient *client.Clien
 		watchChan:     watchChan,
 		instances:     make(map[wamp.ID]*InstanceInfo),
 		clusters:      make(map[wamp.ID]*ClusterInfo),
+		realmManagers: rms,
 	}
+	err = wampClient.SubscribeChan("wamp.registration", rm.regEvents, wamp.Dict{"match": "prefix"})
+	if err != nil {
+		return nil, fmt.Errorf("could not subscribe for registration events in realm: %w", err)
+	}
+	rms.mutex.Lock()
+	defer rms.mutex.Unlock()
 	rms.realmManagers = append(rms.realmManagers, &rm)
 	go rm.RunManageRealm()
 	return &rm, nil
@@ -523,7 +554,7 @@ func (rm *RealmManager) exportClusterMetricsStep(cluster *ClusterInfo, exporter 
 	}
 	defer gzipReader.Close()
 
-	if debugPrintOnce == nil || (debugPrintOnce != nil && *debugPrintOnce) {
+	if debugPrintOnce == nil || *debugPrintOnce {
 		log.Printf("metrics exporter: first iteration, received %d compressed bytes from %s at cluster %s in realm %s of tenant %s",
 			len(b64gzmetrics), exporter, cluster.name, rm.Realm, rm.Tenant)
 		if debugPrintOnce != nil {
@@ -646,6 +677,16 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	return nil
 }
 
+func (rm *RealmManager) Close() error {
+	if rm.realmCloser != nil {
+		rm.realmCloser()
+		rm.realmCloser = nil
+	}
+	rm.realmManagers.remove(rm)
+	close(rm.quit)
+	return rm.wampClient.Close()
+}
+
 func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
 	opCtx, opCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer opCancel()
@@ -656,8 +697,13 @@ func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
 	if key == pathRecipeYaml {
 		// when recipe gets changed we assume all configs should be re-generated and re-deployed
 		// might optimize this later
-		log.Printf("Detected possible change of config generation RECIPE in realm %s of tenant %s", rm.Realm, rm.Tenant)
-		rm.handleClusterConfigChange(opCtx, nil)
+		if event.Type == clientv3.EventTypeDelete {
+			log.Printf("Detected removal of config generation RECIPE in realm %s of tenant %s. The realm will be shut down", rm.Realm, rm.Tenant)
+			rm.Close()
+		} else {
+			log.Printf("Detected possible change of config generation RECIPE in realm %s of tenant %s", rm.Realm, rm.Tenant)
+			rm.handleClusterConfigChange(opCtx, nil)
+		}
 	} else if key == pathMappingYaml {
 		log.Printf("Detected possible change of cluster-to-instance MAPPING in realm %s of tenant %s", rm.Realm, rm.Tenant)
 		var mapping Mapping

@@ -38,6 +38,27 @@ func (imp EtcdJsonnetImporter) Import(importedFrom, importedPath string) (conten
 	return contents, importedPath, nil
 }
 
+func (imp EtcdClient) WatchTenantAndProjectChanges(onRealmAdded func(string, string)) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	prefix := imp.prefix + "/config/"
+	watchChan := imp.cli.Watcher.Watch(ctx, prefix, clientv3.WithPrefix())
+	go func() {
+		for watchResponse := range watchChan {
+			for _, v := range watchResponse.Events {
+				if v.Type != clientv3.EventTypePut {
+					continue
+				}
+				trimmedKey := strings.TrimPrefix(string(v.Kv.Key), prefix)
+				splitPath := strings.Split(trimmedKey, "/")
+				if len(splitPath) == 3 && splitPath[2] == "recipe.yaml" && splitPath[0] != "" && splitPath[1] != "" {
+					go onRealmAdded(splitPath[0], splitPath[1])
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
 func (imp EtcdClient) GetTenantsAndProjects() (res map[string][]string, err error) {
 	return enumerateHierarchy(imp.cli, imp.prefix+"/config")
 }
@@ -65,8 +86,6 @@ func enumerateHierarchy(cli *clientv3.Client, prefix string) (map[string][]strin
 	revision := initialResp.Header.Revision
 
 	results := make(map[string][]string)
-	// Helper map to track which third-level keys we've already added.
-	seen := make(map[string]map[string]struct{})
 
 	// --- Pagination Logic ---
 	const pageSize = 1000
@@ -85,25 +104,21 @@ func enumerateHierarchy(cli *clientv3.Client, prefix string) (map[string][]strin
 		for _, kv := range resp.Kvs {
 			keyStr := string(kv.Key)
 			trimmedKey := strings.TrimPrefix(keyStr, prefix)
-			parts := strings.SplitN(trimmedKey, "/", 3)
+			parts := strings.Split(trimmedKey, "/")
 
-			if len(parts) < 2 {
+			if len(parts) != 3 {
+				continue
+			}
+			if parts[2] != "recipe.yaml" {
 				continue
 			}
 
-			secondLevel, thirdLevel := parts[0], parts[1]
-			if secondLevel == "" || thirdLevel == "" {
+			tenant, project := parts[0], parts[1]
+			if tenant == "" || project == "" {
 				continue
 			}
 
-			if _, ok := seen[secondLevel]; !ok {
-				seen[secondLevel] = make(map[string]struct{})
-			}
-
-			if _, ok := seen[secondLevel][thirdLevel]; !ok {
-				results[secondLevel] = append(results[secondLevel], thirdLevel)
-				seen[secondLevel][thirdLevel] = struct{}{}
-			}
+			results[tenant] = append(results[tenant], project)
 		}
 
 		if !resp.More {
