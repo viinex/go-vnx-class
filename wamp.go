@@ -220,7 +220,7 @@ func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjects
 	rms := RealmManagers{}
 	rms.cancelEtcdWatch = imp.WatchTenantAndProjectChanges(func(tenant string, project string) {
 		var eks EtcdKeyStore
-		eks.cli = imp.cli
+		eks.EtcdClient = imp
 		eks.Tenant = tenant
 		eks.Realm = project
 		err := rms.createRealmManager(theRouter, prometheusUrl, eks)
@@ -232,7 +232,7 @@ func (imp EtcdClient) PopulateWampRealms(theRouter router.Router, tenantProjects
 	for tenant, projects := range tenantProjectsMap {
 		for _, project := range projects {
 			var eks EtcdKeyStore
-			eks.cli = imp.cli
+			eks.EtcdClient = imp
 			eks.Tenant = tenant
 			eks.Realm = project
 			err := rms.createRealmManager(theRouter, prometheusUrl, eks)

@@ -39,6 +39,7 @@ type RealmManager struct {
 	quit        chan struct{}
 	regEvents   chan *wamp.Event
 	watchChan   clientv3.WatchChan
+	cancelWatch context.CancelFunc
 	realmCloser func()
 
 	instances     map[wamp.ID]*InstanceInfo
@@ -160,9 +161,12 @@ FOR:
 }
 
 func (rms *RealmManagers) CreateRealmManager(eks EtcdKeyStore, wampClient *client.Client, prometheusUrl string) (*RealmManager, error) {
-	watchChan := eks.cli.Watcher.Watch(context.Background(), eks.GetRealmConfigKeyPath(""), clientv3.WithPrefix())
+	watchPrefix := eks.GetRealmConfigKeyPath("")
+	ctxWatch, cancelWatch := context.WithCancel(context.Background())
+	watchChan := eks.cli.Watcher.Watch(ctxWatch, watchPrefix, clientv3.WithPrefix())
 	mapping, err := eks.LoadMapping(context.Background(), nil)
 	if err != nil {
+		cancelWatch()
 		return nil, err
 	}
 	rm := RealmManager{
@@ -173,12 +177,14 @@ func (rms *RealmManagers) CreateRealmManager(eks EtcdKeyStore, wampClient *clien
 		quit:          make(chan struct{}),
 		regEvents:     make(chan *wamp.Event, 100),
 		watchChan:     watchChan,
+		cancelWatch:   cancelWatch,
 		instances:     make(map[wamp.ID]*InstanceInfo),
 		clusters:      make(map[wamp.ID]*ClusterInfo),
 		realmManagers: rms,
 	}
 	err = wampClient.SubscribeChan("wamp.registration", rm.regEvents, wamp.Dict{"match": "prefix"})
 	if err != nil {
+		cancelWatch()
 		return nil, fmt.Errorf("could not subscribe for registration events in realm: %w", err)
 	}
 	rms.mutex.Lock()
@@ -683,6 +689,10 @@ func (rm *RealmManager) Close() error {
 		rm.realmCloser = nil
 	}
 	rm.realmManagers.remove(rm)
+	if rm.cancelWatch != nil {
+		rm.cancelWatch()
+		rm.cancelWatch = nil
+	}
 	close(rm.quit)
 	return rm.wampClient.Close()
 }
