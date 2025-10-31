@@ -9,6 +9,9 @@
 *.dylib
 go-vnx-class
 
+*.deb
+web-dist/*
+
 # Test binary, built with `go test -c`
 *.test
 
