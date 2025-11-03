@@ -2,21 +2,22 @@ What is vnx-class
 =================
 This is a service aiming to help for viinex configuration and deployment at scale of more than one instance. It combines the Jsonnet configuration language engine, ETCD client, and a WAMP router.
 
-Jsonnet is used for generating viinex configs, according to the needs of a specific user in a specific project.
+Jsonnet is used for generating viinex configs, according to the needs of a specific customer in a specific project.
 
 Etcd is used as a single storage for configuration-related information, as well as for holding the information on current distribution of viinex clusters to viinex instances.
 
-WAMP is used to communicate with viinex instances and clusters. A WAMP realm (an isolated namespace) is being instantiated by `vnx-class` for every "project". Viinex instances should register themselves within the realm. Once this happens, `vnx-class` can manage the registered viinex instance, in particular -- push clusters configuration onto that instance, and instruct it to run the clusters. Clusters may too register in the same WAMP realm.
+WAMP is used to communicate with viinex instances and clusters. A WAMP realm (an isolated namespace) is being instantiated by `vnx-class` for every "project". Viinex instances should register themselves within the realm. Once this happens, `vnx-class` can manage the registered viinex instance, in particular -- push clusters' configuration onto that instance, and instruct it to run the clusters. Clusters, as they go live, may too register themselves in the same WAMP realm.
 
 `vnx-class` means viinex cloud assistant.
 
 Vocabulary
 -----------
 A few words about the terminology:
-- viinex instance is a running `viinex` process. Typically (for the use together with `vnx-class`) it's configured so that it may handle requests to create and run dynamic viinex clusters.
-- viinex cluster is a group of viinex applicative objects, which are created and being run together at the same time, linked together before they're started, so each object knows which other objects it works with. More information on viinex clusters is available in viinex documentation https://www.viinex.com/ViinexGuide.pdf
-- Tenant is a customer, that is a person or an organization, who uses viinex applications
-- Project is an isolated group of viinex instances and clusters.
+- viinex *instance* is a running `viinex` process. Typically (for the use together with `vnx-class`) it's configured so that it may handle requests to create and run dynamic viinex clusters.
+- viinex *cluster* is a group of viinex applicative objects, which are created and being run together at the same time, linked together before they're started, so each object knows which other objects it works with. More information on viinex clusters is available in viinex documentation https://www.viinex.com/ViinexGuide.pdf
+- *Tenant* is a customer, that is a person or an organization, who uses viinex applications
+- *Project* is an isolated group of viinex instances and clusters.
+- *Realm* is an isolated namespace maintained by WAMP router. Objects can be transparently addressed and address each other within the same realm. Within vnx-class, there is one realm created of every project, and the name of that realm matches the name of the project.
 - The term "file" is often used throughout this document where it actually refers to a value within the ETCD database. This is always clear from the context: if the subject operating on a "file" is `vnx-class` service, -- then the file is a record in ETCD, unless it's `vnx-class`' own configuration file.
 
 
@@ -29,11 +30,11 @@ There are three top-level branches: `templates`, `config` and `status`.
 
 Branch `templates` should have a sub-branch `jsonnet`. Keys stored under `templates/jsonnet` should have a suffix of `jsonnet` and should be jsonnet files defining how viinex configuration is generated. The files referenced by jsonnets with `import` directive are being sought under the same location, that is under `templates/jsonnet/` prefix in etcd. The `templates` branch is shared accross all tenants and projects.
 
-Branch `config` contains two sub-levels named after Tenants and their Projects. (Tenant is a customer/organisation code name, while Project is a code name of the project). A project is considered an isolated namespace, where viinex instances and objects can potentially address each other, and users connecting to that namespace can address viinex objects. (This does not mean there is no access control enforced by the objects -- but access control is enforced by viinex objects, whereas Projects form the shape of infrastructure and are defined by `vnx-class`)
+Branch `config` contains two sub-levels named after Tenants and their Projects. (Tenant is a customer/organisation code name, while Project is a code name of the project). A project is considered an isolated namespace, where viinex instances and objects can potentially address each other, and users connecting to that namespace can address viinex objects. (This does not mean there is no access control enforced by the objects -- but access control is enforced by viinex objects, whereas Projects form the shape of infrastructure and are defined by `vnx-class`). Note that while Tenants are present in etcd hierarchy, -- at the time of this writing they don't form separate namespaces for projects. This means that no two projects may have the same name, even if they belong to different tenants.
 
 Branch `status` is automatically maintained by `vnx-class` and should not be modified by any actor except vnx-class instances.
 
-Under the prefix of `config/TENANT/PROJECT/` there should be a sub-prefix `clusters`, containing yaml files, each defining a configuration of an explicit cluster. Then there may be auxiliary files named `recipe.yaml` and `mapping.yaml`, defininig how the Jsonnet templates are applied to generate the viinex configuration from the yaml cluster configurations stored in etcd (that's `recipe.yaml`), and also how the clusters should be distributed (assigned) to viinex instances (that's `mapping.yaml`). Also there's another subprefix `wamp/` residing under `c/T/P/` branch; that subprefix holds the information to authenticate viinex instances and users connecting to WAMP realm associated with the project. In particular, for every WAMP user there should be two keys, `config/TENANT/PROJECT/wamp/USERNAME/role`, holding the role name of that user, and `config/TENANT/PROJECT/wamp/USERNAME/cryptosign`, holding the Cryptosign public key of the user.
+Under the prefix of `config/TENANT/PROJECT/` there should be a sub-prefix `clusters`, containing yaml files, each defining a configuration of an explicit cluster. There also should be auxiliary files named `recipe.yaml` and `mapping.yaml`, which define how the Jsonnet templates are applied to generate the viinex configuration from the yaml cluster configurations stored in etcd (that's `recipe.yaml`), and also how the clusters should be distributed (assigned) to viinex instances (that's `mapping.yaml`). Also there's another subprefix `wamp/` residing under `cconfig/TENANT/PROJECT/` branch; that subprefix holds the information to authenticate viinex instances and users connecting to WAMP realm associated with the project. In particular, for every WAMP user there should be two keys, `config/TENANT/PROJECT/wamp/USERNAME/role`, holding the role name of that user, and `config/TENANT/PROJECT/wamp/USERNAME/cryptosign`, holding the Cryptosign public key of the user.
 
 In addition to that, `config/TENANT/PROJECT/` may store additional subkeys with other arbitrary names, holding any data which may be needed to generate configuration. These keys can be referenced as external files from within Jsonnet code.
 
@@ -86,7 +87,7 @@ main: mainMyPrivate.jsonnet
 
 Most important line here is `main: mainMyPrivate.jsonnet` which defines the entry point Jsonnet script for generating the configuration.
 
-When `vnx-class` has to or is asked to produce the configuration for a specific cluster in a specific project, it does the following:
+When `vnx-class` needs to or is asked to produce the configuration for a specific cluster in a specific project, it does the following:
 - reads the `/config/TENANT/PROJECT/recipe.yaml` for that project. If none exists, it's assumed that Jsonnet entry point is `main.jsonnet`.
 - reads the yaml definition of the cluster configuration under `/config/TENANT/PROJECT/cluster/CLUSTERNAME.yaml`.
 - for every entry mentioned in `ext-str-file` section of `recipe.yaml` file, -- respective file (key) is read from ETCD. The contents of the file is made available for Jsonnet engine as `ext-str-file` with the key name, as it's specified in the `ext-str-file` section of `recipe.yaml`. For example, if `recipe.yaml` contains the record
