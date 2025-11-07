@@ -28,7 +28,7 @@ Top-level branches start under a common prefix which can be configured with conf
 
 There are three top-level branches: `templates`, `config` and `status`.
 
-Branch `templates` should have a sub-branch `jsonnet`. Keys stored under `templates/jsonnet` should have a suffix of `jsonnet` and should be jsonnet files defining how viinex configuration is generated. The files referenced by jsonnets with `import` directive are being sought under the same location, that is under `templates/jsonnet/` prefix in etcd. The `templates` branch is shared accross all tenants and projects.
+Branch `templates` should have a sub-branch `jsonnet`. Keys stored under `templates/jsonnet` should have a suffix of `jsonnet` and should be jsonnet files defining how viinex configuration is generated. The files referenced by jsonnets with `import` directive are being sought under the same location, that is under `templates/jsonnet/` prefix in etcd. The `templates` branch is shared across all tenants and projects.
 
 Branch `config` contains two sub-levels named after Tenants and their Projects. (Tenant is a customer/organisation code name, while Project is a code name of the project). A project is considered an isolated namespace, where viinex instances and objects can potentially address each other, and users connecting to that namespace can address viinex objects. (This does not mean there is no access control enforced by the objects -- but access control is enforced by viinex objects, whereas Projects form the shape of infrastructure and are defined by `vnx-class`). Note that while Tenants are present in etcd hierarchy, -- at the time of this writing they don't form separate namespaces for projects. This means that no two projects may have the same name, even if they belong to different tenants.
 
@@ -88,7 +88,7 @@ main: mainMyPrivate.jsonnet
 Most important line here is `main: mainMyPrivate.jsonnet` which defines the entry point Jsonnet script for generating the configuration.
 
 When `vnx-class` needs to or is asked to produce the configuration for a specific cluster in a specific project, it does the following:
-- reads the `/config/TENANT/PROJECT/recipe.yaml` for that project. If none exists, it's assumed that Jsonnet entry point is `main.jsonnet`.
+- reads the `/config/TENANT/PROJECT/recipe.yaml` for that project. (`recipe.yaml` key must exist in order for the realm to be recognized by `vnx-class` service. Only for the sub-branches of `/config` which contain `recipe.yaml` the realm is created and maintained by `vnx-class`).
 - reads the yaml definition of the cluster configuration under `/config/TENANT/PROJECT/cluster/CLUSTERNAME.yaml`.
 - for every entry mentioned in `ext-str-file` section of `recipe.yaml` file, -- respective file (key) is read from ETCD. The contents of the file is made available for Jsonnet engine as `ext-str-file` with the key name, as it's specified in the `ext-str-file` section of `recipe.yaml`. For example, if `recipe.yaml` contains the record
 ```
