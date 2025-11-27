@@ -192,7 +192,7 @@ func (eks EtcdKeyStore) GetClusterConfig(ctx context.Context, clusterName string
 	vm.ExtVar("CID", clusterName)
 	jsonStr, err := vm.EvaluateFile(recipe.Main)
 	if err != nil {
-		log.Print("error while building config", err)
+		log.Print("error while building config: ", err)
 		return "", err
 	}
 	return jsonStr, nil

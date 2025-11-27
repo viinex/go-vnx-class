@@ -746,24 +746,44 @@ func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeClus
 	err := rm.iterateStatusMappingRecords(ctx, func(ctx context.Context, smr StatusMappingRecord) (err error) {
 		if maybeCluster == nil || smr.Cluster == *maybeCluster {
 			affected[smr.Instance] = append(affected[smr.Instance], smr.Cluster)
+			// todo: maybe instead of deletion add another key to mark the record as dirty
 			_, err = rm.cli.Delete(ctx, rm.GetRealmStatusMappingRecordPrefix(smr.Instance)+smr.Cluster)
 		}
 		return err
 	})
 	if err != nil {
 		log.Printf("failed to remove outdated status mapping records: %s\n", err)
-		return nil
+		return err
 	}
-	//var wg sync.WaitGroup
+
 	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
 	for _, instance := range rm.instances {
-		clusters, found := affected[instance.name]
-		if !found {
-			continue
+		clustersProjected, err := rm.getInstanceClustersProjected(instance.name)
+		if err != nil {
+			log.Printf("failed to build list of projected clusters for instance %s: %s\n", instance.name, err)
+			return err
 		}
+		clusters := affected[instance.name]
+		if len(clusters) == 0 || maybeCluster == nil {
+			for _, c := range clustersProjected {
+				if maybeCluster == nil || c == *maybeCluster {
+					if !slices.Contains(clusters, c) {
+						clusters = append(clusters, c)
+					}
+				}
+			}
+		}
+
 		//wg.Add(len(clusters))
 		for _, cluster := range clusters {
 			doDeploy := rm.mapping.MatchClusterToInstance(instance.name, cluster)
+			if doDeploy {
+				log.Printf("going to (re-)deploy cluster %s at instance %s", cluster, instance.name)
+			} else {
+				log.Printf("going to dispose cluster %s at instance %s", cluster, instance.name)
+			}
+
 			go func() {
 				//defer wg.Done()
 				if doDeploy {
@@ -774,8 +794,7 @@ func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeClus
 			}()
 		}
 	}
-	rm.mutex.Unlock()
-	//wg.Wait()
+
 	return nil
 }
 
