@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/gammazero/nexus/v3 v3.2.2
 	github.com/google/go-jsonnet v0.21.0
-	go.etcd.io/etcd/client/v3 v3.6.6
+	go.etcd.io/etcd/client/v3 v3.5.25
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -18,8 +18,8 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
-	go.etcd.io/etcd/api/v3 v3.6.6 // indirect
-	go.etcd.io/etcd/client/pkg/v3 v3.6.6 // indirect
+	go.etcd.io/etcd/api/v3 v3.5.25 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.5.25 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
