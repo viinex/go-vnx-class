@@ -44,8 +44,14 @@ type RealmManager struct {
 
 	instances     map[wamp.ID]*InstanceInfo
 	clusters      map[wamp.ID]*ClusterInfo
+	dirtyList     []ClusterInstancePair
 	realmManagers *RealmManagers
 	mutex         sync.RWMutex
+}
+
+type ClusterInstancePair struct {
+	cluster  string
+	instance string
 }
 
 type InstanceInfo struct {
@@ -585,6 +591,63 @@ func (rm *RealmManager) exportClusterMetricsStep(cluster *ClusterInfo, exporter 
 	return nil
 }
 
+func (rm *RealmManager) markDirty(instanceName string, cluster string) {
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
+	for _, d := range rm.dirtyList {
+		if d.instance == instanceName && d.cluster == cluster {
+			return
+		}
+	}
+	rm.dirtyList = append(rm.dirtyList, ClusterInstancePair{instance: instanceName, cluster: cluster})
+	go (func() {
+		time.Sleep(time.Millisecond * 2000) // can do better here
+		rm.checkDirty()
+	})()
+}
+
+func (rm *RealmManager) checkDirty() {
+	rm.mutex.Lock()
+	defer rm.mutex.Unlock()
+	if len(rm.dirtyList) == 0 {
+		return
+	}
+	pair := rm.dirtyList[len(rm.dirtyList)-1]
+	rm.dirtyList = rm.dirtyList[:len(rm.dirtyList)-1]
+	var instance *InstanceInfo = nil
+	for _, i := range rm.instances {
+		if i.name == pair.instance {
+			instance = i
+			break
+		}
+	}
+	if instance == nil {
+		return
+	}
+	cluster := pair.cluster
+
+	doDeploy := rm.mapping.MatchClusterToInstance(instance.name, cluster)
+	if doDeploy {
+		log.Printf("checkDirty: going to (re-)deploy cluster %s at instance %s", cluster, instance.name)
+	} else {
+		log.Printf("checkDirty: going to dispose cluster %s at instance %s", cluster, instance.name)
+	}
+
+	go func() {
+		if doDeploy {
+			err := rm.deployCluster(instance, cluster)
+			if err != nil {
+				log.Printf("checkDirty: failed to deploy cluster %s at instance %s: %s", cluster, instance.name, err)
+			}
+		} else {
+			err := rm.disposeCluster(instance, cluster)
+			if err != nil {
+				log.Printf("checkDirty: failed to dispose cluster %s from instance %s: %s", cluster, instance.name, err)
+			}
+		}
+	}()
+}
+
 func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) error {
 	opCtx, opCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer opCancel()
@@ -603,6 +666,7 @@ func (rm *RealmManager) disposeCluster(instance *InstanceInfo, cluster string) e
 		return err
 	}
 	if !prepared {
+		rm.markDirty(instance.name, cluster)
 		return fmt.Errorf("controller script at instance %s declined prepare call to dispose cluster %s", instance.name, cluster)
 	}
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".delete", nil, wamp.List{hashPath}, nil, nil)
@@ -647,30 +711,31 @@ func (rm *RealmManager) deployCluster(instance *InstanceInfo, cluster string) er
 	res, err := rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
 		wamp.List{wamp.Dict{"method": "prepare", "cluster": cluster, "intent": "deploy"}}, nil, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("update (prepare) call on the controller script failed for cluster %s: %w", cluster, err)
 	}
 	var prepared bool
 	err = DecodeViaJSON(res, &prepared)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not decode result of .update (prepare) call on the controller script: %w", err)
 	}
 	if !prepared {
+		rm.markDirty(instance.name, cluster)
 		return fmt.Errorf("controller script at instance %s declined prepare call to deploy cluster %s", instance.name, cluster)
 	}
 	// populate the remote database with config data and its hash
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".put", nil, wamp.List{configPath, config}, nil, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write cluster config to viinex database: %w", err)
 	}
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ConfigDatabase+".put", nil, wamp.List{hashPath, hash}, nil, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write cluster config hash to viinex database: %w", err)
 	}
 	// commit the remote transaction ("deploy")
 	_, err = rm.wampClient.Call(opCtx, instance.endpoints.ControllerScript+".update", nil,
 		wamp.List{wamp.Dict{"method": "deploy", "cluster": cluster}}, nil, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("update (deploy) call on the controller script failed: %w", err)
 	}
 
 	// and record the confirmation in ETCD that config with said hash has been pushed and deployed
@@ -735,8 +800,11 @@ func (rm *RealmManager) handleEtcdConfigBranchChange(event *clientv3.Event) {
 	} else if after, found := strings.CutPrefix(key, prefixClusters); found {
 		cluster, found := strings.CutSuffix(after, ".yaml")
 		if found {
-			log.Printf("Detected possible change of CONFIG for cluster %s in realm %s of tenant %s", cluster, rm.Realm, rm.Tenant)
-			rm.handleClusterConfigChange(opCtx, &cluster)
+			log.Printf("Detected possible change of CONFIG for cluster %s in realm %s of tenant %s, key version: %d", cluster, rm.Realm, rm.Tenant, event.Kv.Version)
+			err := rm.handleClusterConfigChange(opCtx, &cluster)
+			if err != nil {
+				log.Printf("failed to handle cluster config change for cluster %s: %s", cluster, err)
+			}
 		}
 	}
 }
@@ -775,7 +843,6 @@ func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeClus
 			}
 		}
 
-		//wg.Add(len(clusters))
 		for _, cluster := range clusters {
 			doDeploy := rm.mapping.MatchClusterToInstance(instance.name, cluster)
 			if doDeploy {
@@ -785,11 +852,16 @@ func (rm *RealmManager) handleClusterConfigChange(ctx context.Context, maybeClus
 			}
 
 			go func() {
-				//defer wg.Done()
 				if doDeploy {
-					rm.deployCluster(instance, cluster)
+					err := rm.deployCluster(instance, cluster)
+					if err != nil {
+						log.Printf("failed to deploy cluster %s at instance %s: %s", cluster, instance.name, err)
+					}
 				} else {
-					rm.disposeCluster(instance, cluster)
+					err := rm.disposeCluster(instance, cluster)
+					if err != nil {
+						log.Printf("failed to dispose cluster %s from instance %s: %s", cluster, instance.name, err)
+					}
 				}
 			}()
 		}
