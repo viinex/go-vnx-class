@@ -97,8 +97,10 @@ func main() {
 	}
 
 	srv := router.NewWebsocketServer(theRouter)
+
+	err = srv.AllowOrigins([]string{"*"})
 	if err != nil {
-		log.Fatal("ListenAndServe failed on a wamp router: ", err)
+		log.Fatal("failed to set allowed origins on the wamp router: ", err)
 	}
 
 	imp := EtcdClient{cli: cli, prefix: config.EtcdPrefix}
