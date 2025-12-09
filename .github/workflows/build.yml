@@ -29,9 +29,17 @@ jobs:
         with:
           images: viinex/vnx-class
 
+      - name: Get latest commit hash of viinex-demo-ui
+        id: demo-ui-rev
+        run: |
+          # Fetches the commit hash of the HEAD (default branch) of the remote repository
+          # and sets it as a step output variable named 'sha'.
+          echo "sha=$(git ls-remote https://github.com/viinex/viinex-demo-ui.git HEAD | cut -f1)" >> $GITHUB_OUTPUT
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
+          build-args: CACHE_BUSTER=${{ steps.demo-ui-rev.outputs.sha }}
           tags: "${{ vars.DOCKER_USER }}/vnx-class:latest"
           provenance: mode=max
           sbom: true

@@ -24,6 +24,8 @@ RUN apk add --no-cache git make
 
 WORKDIR /viinex-demo-ui
 
+ARG CACHE_BUSTER
+
 RUN git clone https://github.com/viinex/viinex-demo-ui .
 
 RUN make env
