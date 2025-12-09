@@ -149,7 +149,7 @@ func (ksi EtcdKeyStore) AuthRole(authid string) (string, error) {
 		return "", err
 	}
 	if len(k.Kvs) != 1 {
-		return "", errors.New("key 'role' not found")
+		return "", fmt.Errorf("key 'role' not found while looking up for authid %s in realm %s of tenant %s", authid, ksi.Realm, ksi.Tenant)
 	}
 	return string(k.Kvs[0].Value), nil
 }
