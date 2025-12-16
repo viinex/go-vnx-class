@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 
 	//"log"
 	//"os"
@@ -19,8 +20,6 @@ import (
 	"github.com/gammazero/nexus/v3/wamp"
 
 	hex "encoding/hex"
-
-	yaml "gopkg.in/yaml.v3"
 )
 
 type WampKeyStoreData struct {
@@ -29,30 +28,6 @@ type WampKeyStoreData struct {
 	Creds map[string]string   `yaml:"creds"`
 }
 
-func (ksi EtcdKeyStore) AuthKey1(authid, authmethod string) ([]byte, error) {
-	if authmethod != "cryptosign" {
-		return nil, fmt.Errorf("unsupported authmethod %s", authmethod)
-	}
-	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmConfigKeyPath("wamp.yaml"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get wamp.yaml from etcd: %w", err)
-	}
-	var wks WampKeyStoreData
-	v := k.Kvs[0].Value
-	err = yaml.Unmarshal(v, &wks)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode wamp.yaml: %w", err)
-	}
-	keyHex, ok := wks.Creds[authid]
-	if !ok {
-		return nil, fmt.Errorf("authid %s not found", authid)
-	}
-	key, err := hex.DecodeString(keyHex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to base16 decode value: %w", err)
-	}
-	return key, nil
-}
 func (ksi EtcdKeyStore) AuthKey(authid, authmethod string) ([]byte, error) {
 	if authmethod != "cryptosign" {
 		err := fmt.Errorf("unsupported authmethod %s", authmethod)
@@ -70,8 +45,8 @@ func (ksi EtcdKeyStore) AuthKey(authid, authmethod string) ([]byte, error) {
 		log.Printf("EtcdKeyStore.AuthKey: %s\n", err)
 		return nil, err
 	}
-	keyHex := k.Kvs[0].Value
-	key, err := hex.DecodeString(string(keyHex))
+	keyHex := strings.TrimSpace(string(k.Kvs[0].Value))
+	key, err := hex.DecodeString(keyHex)
 	if err != nil {
 		err = fmt.Errorf("not a base16 string: %w (while parsing the key for authid %s in realm %s of tenant %s)", err, authid, ksi.Realm, ksi.Tenant)
 		log.Printf("EtcdKeyStore.AuthKey: %s\n", err)
@@ -161,7 +136,7 @@ func (ksi EtcdKeyStore) AuthRole(authid string) (string, error) {
 	if len(k.Kvs) != 1 {
 		return "", fmt.Errorf("key 'role' not found while looking up for authid %s in realm %s of tenant %s", authid, ksi.Realm, ksi.Tenant)
 	}
-	return string(k.Kvs[0].Value), nil
+	return string(strings.TrimSpace(string(k.Kvs[0].Value))), nil
 }
 
 // PasswordInfo implements auth.KeyStore.
