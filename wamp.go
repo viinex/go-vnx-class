@@ -55,22 +55,32 @@ func (ksi EtcdKeyStore) AuthKey1(authid, authmethod string) ([]byte, error) {
 }
 func (ksi EtcdKeyStore) AuthKey(authid, authmethod string) ([]byte, error) {
 	if authmethod != "cryptosign" {
-		return nil, fmt.Errorf("unsupported authmethod %s", authmethod)
+		err := fmt.Errorf("unsupported authmethod %s", authmethod)
+		log.Printf("EtcdKeyStore.AuthKey: %s\n", err)
+		return nil, err
 	}
-	k, err := ksi.cli.KV.Get(context.Background(), ksi.GetRealmConfigKeyPath("wamp/"+authid+"/cryptosign"))
+	path := ksi.GetRealmConfigKeyPath("wamp/" + authid + "/cryptosign")
+	k, err := ksi.cli.KV.Get(context.Background(), path)
 	if err != nil {
+		log.Printf("EtcdKeyStore.AuthKey: failed to get the key %s from etcd: %s\n", path, err)
 		return nil, err
 	}
 	if len(k.Kvs) != 1 {
-		return nil, errors.New("key 'cryptosign' not found")
+		err = fmt.Errorf("key 'cryptosign' not found for authid %s in realm %s of tenant %s", authid, ksi.Realm, ksi.Tenant)
+		log.Printf("EtcdKeyStore.AuthKey: %s\n", err)
+		return nil, err
 	}
 	keyHex := k.Kvs[0].Value
 	key, err := hex.DecodeString(string(keyHex))
 	if err != nil {
-		return nil, fmt.Errorf("not a base16 string: %w", err)
+		err = fmt.Errorf("not a base16 string: %w (while parsing the key for authid %s in realm %s of tenant %s)", err, authid, ksi.Realm, ksi.Tenant)
+		log.Printf("EtcdKeyStore.AuthKey: %s\n", err)
+		return nil, err
 	}
 	if len(key) != 32 {
-		return nil, errors.New("cryptosign public key length should be 32")
+		err = fmt.Errorf("cryptosign public key length should be 32")
+		log.Printf("EtcdKeyStore.AuthKey: %s\n", err)
+		return nil, err
 	}
 	return key, nil
 }

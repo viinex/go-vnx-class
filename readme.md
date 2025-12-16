@@ -112,7 +112,7 @@ then Jsonnet code may reference `std.extVar("somePrivateEndpoint")`.
 
 Note that Jsonnet language is designed to be free from side effects, which is why the output of a Jsonnet program is fully defined by its text and the provided `extVar`s.
 
-Sometimes it can be handy to test what's being generated and debug Jsonnet code. While this is totally possible to do offilne, without the use of `vnx-class`, -- the latter still offers the WAMP endpoint to retreive the configuration of a cluster. Note that configuration may contain sensitive information, which is why the actual WAMP credentials are required to access that endpoint. The actual WAMP call may be performed with the help from `wick` utility available at https://github.com/viinex/wick and would look as follows:
+Sometimes it can be handy to test what's being generated and debug Jsonnet code. While this is totally possible to do offilne, without the use of `vnx-class`, -- the latter still offers the WAMP endpoint to retrieve the configuration of a cluster. Note that configuration may contain sensitive information, which is why the actual WAMP credentials are required to access that endpoint. The actual WAMP call may be performed with the help from `wick` utility available at https://github.com/viinex/wick and would look as follows:
 ```
 export WICK_URL=wss://cloud.viinex.com/ws
 export WICK_AUTHMETHOD=cryptosign
