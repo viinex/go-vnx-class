@@ -1,12 +1,12 @@
 etcd:
-  username: vnxclass
-  password: vnxclass
+#  username: vnxclass
+#  password: vnxclass
   endpoints:
-    - 192.168.0.103:2379
+    - 127.0.0.1:2379
 
 #wamp: 127.0.0.1:8080
 wamp: 0.0.0.0:8080
+etcd-prefix: /viinex
+#prometheus-push-uri: http://192.168.0.163:8428/api/v1/import/prometheus
 
-prometheus-push-uri: http://127.0.0.1:8428/api/v1/import/prometheus
-
-static: c:/program files/viinex/share/web
+static: /home/gzh/projects/viinex/web/dist/browser/en
