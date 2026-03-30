@@ -69,6 +69,36 @@ func maybeSetFromEnv(env string, dest *string) {
 	}
 }
 
+// Custom handler for serving static files and SPA fallback
+type spaHandler struct {
+	staticPath string
+	indexPath  string
+}
+
+func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check if the requested file exists in the static directory
+	fullPath := h.staticPath + r.URL.Path
+	if _, err := os.Stat(fullPath); err == nil {
+		// File exists, serve it using http.FileServer
+		http.FileServer(http.Dir(h.staticPath)).ServeHTTP(w, r)
+		return
+	}
+
+	// If the file doesn't exist and the path does not start with "/v1/",
+	// serve index.html
+	if !strings.HasPrefix(r.URL.Path, "/v1/") {
+		http.ServeFile(w, r, h.indexPath)
+		// Add headers to prevent caching
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		return
+	}
+
+	// If the file doesn't exist and the path starts with "/v1/", return 404
+	http.NotFound(w, r)
+}
+
 func main() {
 	configPath := flag.String("config", "", "Path to configuration file")
 	flag.Parse()
@@ -116,9 +146,12 @@ func main() {
 	}
 	defer closer.Close()
 
-	http.HandleFunc("/ws", srv.ServeHTTP)
-	fs := http.FileServer(http.Dir(config.Static))
-	http.Handle("/", http.StripPrefix("/", fs))
+	// Register WAMP websocket handler
+	http.HandleFunc("/ws", srv.ServeHTTP) // This handler takes precedence over the root handler for /ws
+
+	// Create and register the SPA handler
+	spa := spaHandler{staticPath: config.Static, indexPath: config.Static + "/index.html"}
+	http.Handle("/", spa)
 
 	err = http.ListenAndServe(config.Wamp, nil)
 	if err != nil {
